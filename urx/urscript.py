@@ -25,17 +25,17 @@ OUTPUT_DOMAIN_VOLTAGE = [
 
 
 class URScript(object):
-
     def __init__(self):
-        self.logger = logging.getLogger(u"urscript")
+        # self.logger = logging.getLogger("urscript")
+        self.logger = logging.getLogger('URX Logger')
         # The header is code that is before and outside the myProg() method
         self.header = ""
         # The program is code inside the myProg() method
         self.program = ""
 
     def __call__(self):
-        if(self.program == ""):
-            self.logger.debug(u"urscript program is empty")
+        if self.program == "":
+            self.logger.debug("urscript program is empty")
             return ""
 
         # Construct the program
@@ -63,7 +63,7 @@ class URScript(object):
         Ensure that unsigned char values are constrained
         to between 0 and 255.
         """
-        assert(isinstance(value, int))
+        assert isinstance(value, int)
         if value < 0:
             value = 0
         elif value > 255:
@@ -72,27 +72,27 @@ class URScript(object):
 
     def _set_analog_inputrange(self, port, vrange):
         if port in CONTROLLER_PORTS:
-            assert(vrange in CONTROLLER_VOLTAGE)
+            assert vrange in CONTROLLER_VOLTAGE
         elif port in TOOL_PORTS:
-            assert(vrange in TOOL_VOLTAGE)
+            assert vrange in TOOL_VOLTAGE
         msg = "set_analog_inputrange({},{})".format(port, vrange)
         self.add_line_to_program(msg)
 
     def _set_analog_output(self, input_id, signal_level):
-        assert(input_id in [0, 1])
-        assert(signal_level in [0, 1])
+        assert input_id in [0, 1]
+        assert signal_level in [0, 1]
         msg = "set_analog_output({}, {})".format(input_id, signal_level)
         self.add_line_to_program(msg)
 
     def _set_analog_outputdomain(self, port, domain):
-        assert(domain in OUTPUT_DOMAIN_VOLTAGE)
+        assert domain in OUTPUT_DOMAIN_VOLTAGE
         msg = "set_analog_outputdomain({},{})".format(port, domain)
         self.add_line_to_program(msg)
 
     def _set_payload(self, mass, cog=None):
         msg = "set_payload({}".format(mass)
         if cog:
-            assert(len(cog) == 3)
+            assert len(cog) == 3
             msg = "{},{}".format(msg, cog)
         msg = "{})".format(msg)
         self.add_line_to_program(msg)
@@ -104,7 +104,7 @@ class URScript(object):
         self.add_line_to_program(msg)
 
     def _set_tool_voltage(self, voltage):
-        assert(voltage in [0, 12, 24])
+        assert voltage in [0, 12, 24]
         msg = "set_tool_voltage({})".format(voltage)
         self.add_line_to_program(msg)
 
@@ -113,44 +113,46 @@ class URScript(object):
         self.add_line_to_program(msg)
 
     def _socket_close(self, socket_name):
-        msg = "socket_close(\"{}\")".format(socket_name)
+        msg = 'socket_close("{}")'.format(socket_name)
         self.add_line_to_program(msg)
 
     def _socket_get_var(self, var, socket_name):
-        msg = "socket_get_var(\"{}\",\"{}\")".format(var, socket_name)
+        msg = 'socket_get_var("{}","{}")'.format(var, socket_name)
         self.add_line_to_program(msg)
         self._sync()
 
     def _socket_open(self, socket_host, socket_port, socket_name):
-        msg = "socket_open(\"{}\",{},\"{}\")".format(socket_host,
-                                                     socket_port,
-                                                     socket_name)
+        msg = 'socket_open("{}",{},"{}")'.format(socket_host, socket_port, socket_name)
         self.add_line_to_program(msg)
 
     def _socket_read_byte_list(self, nbytes, socket_name):
-        msg = "global var_value = socket_read_byte_list({},\"{}\")".format(nbytes, socket_name)  # noqa
+        msg = 'global var_value = socket_read_byte_list({},"{}")'.format(
+            nbytes, socket_name
+        )  # noqa
         self.add_line_to_program(msg)
         self._sync()
 
     def _socket_send_string(self, message, socket_name):
-        msg = "socket_send_string(\"{}\",\"{}\")".format(message, socket_name)  # noqa
+        msg = 'socket_send_string("{}","{}")'.format(message, socket_name)  # noqa
         self.add_line_to_program(msg)
         self._sync()
 
     def _socket_set_var(self, var, value, socket_name):
-        msg = "socket_set_var(\"{}\",{},\"{}\")".format(var, value, socket_name)  # noqa
+        msg = 'socket_set_var("{}",{},"{}")'.format(var, value, socket_name)  # noqa
         self.add_line_to_program(msg)
         self._sync()
 
-    def _socket_get_var2var(self, var, varout, socket_name, prefix = ''):
-        msg = "{}{} = socket_get_var(\"{}\",\"{}\")".format(prefix, varout, var, socket_name)
+    def _socket_get_var2var(self, var, varout, socket_name, prefix=""):
+        msg = '{}{} = socket_get_var("{}","{}")'.format(
+            prefix, varout, var, socket_name
+        )
         self.add_line_to_program(msg)
 
     def _socket_send_byte(self, byte, socket_name):
-        msg = "socket_send_byte(\"{}\",\"{}\")".format(str(byte), socket_name)  # noqa
+        msg = 'socket_send_byte("{}","{}")'.format(str(byte), socket_name)  # noqa
         self.add_line_to_program(msg)
         self._sync()
-        
+
     def _sync(self):
         msg = "sync()"
         self.add_line_to_program(msg)
