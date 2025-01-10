@@ -64,11 +64,9 @@ SOCKET_NAME = "gripper_socket"
 
 
 class RobotiqScript(URScript):
-
-    def __init__(self,
-                 socket_host=SOCKET_HOST,
-                 socket_port=SOCKET_PORT,
-                 socket_name=SOCKET_NAME):
+    def __init__(
+        self, socket_host=SOCKET_HOST, socket_port=SOCKET_PORT, socket_name=SOCKET_NAME
+    ):
         self.socket_host = socket_host
         self.socket_port = socket_port
         self.socket_name = socket_name
@@ -76,14 +74,12 @@ class RobotiqScript(URScript):
 
         # Reset connection to gripper
         self._socket_close(self.socket_name)
-        self._socket_open(self.socket_host,
-                          self.socket_port,
-                          self.socket_name)
+        self._socket_open(self.socket_host, self.socket_port, self.socket_name)
 
     def _import_rq_script(self):
         dir_path = os.path.dirname(os.path.realpath(__file__))
-        rq_script = os.path.join(dir_path, 'rq_script.script')
-        with open(rq_script, 'rb') as f:
+        rq_script = os.path.join(dir_path, "rq_script.script")
+        with open(rq_script, "rb") as f:
             rq_script = f.read()
             self.add_header_to_program(rq_script)
 
@@ -138,15 +134,16 @@ class RobotiqScript(URScript):
 
 
 class Robotiq_Two_Finger_Gripper(object):
-
-    def __init__(self,
-                 robot,
-                 payload=0.85,
-                 speed=255,
-                 force=50,
-                 socket_host=SOCKET_HOST,
-                 socket_port=SOCKET_PORT,
-                 socket_name=SOCKET_NAME):
+    def __init__(
+        self,
+        robot,
+        payload=0.85,
+        speed=255,
+        force=50,
+        socket_host=SOCKET_HOST,
+        socket_port=SOCKET_PORT,
+        socket_name=SOCKET_NAME,
+    ):
         self.robot = robot
         self.payload = payload
         self.speed = speed
@@ -154,15 +151,18 @@ class Robotiq_Two_Finger_Gripper(object):
         self.socket_host = socket_host
         self.socket_port = socket_port
         self.socket_name = socket_name
-        self.logger = logging.getLogger(u"robotiq")
+        # self.logger = logging.getLogger("robotiq")
+        self.logger = logging.getLogger('URX Logger')
 
     def _get_new_urscript(self):
         """
         Set up a new URScript to communicate with gripper
         """
-        urscript = RobotiqScript(socket_host=self.socket_host,
-                                 socket_port=self.socket_port,
-                                 socket_name=self.socket_name)
+        urscript = RobotiqScript(
+            socket_host=self.socket_host,
+            socket_port=self.socket_port,
+            socket_name=self.socket_name,
+        )
 
         # Set input and output voltage ranges
         urscript._set_analog_inputrange(0, 0)
