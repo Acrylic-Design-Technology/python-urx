@@ -661,25 +661,25 @@ class SecondaryMonitor(Thread):
                 # self.logger.debug("Could not find packet in received data")
                 try:
                     tmp = self._s_secondary.recv(1024)
-                except ConnectionResetError:
-                    
-                    # print("bruh")
-                    # traceback.print_exc()
-                    print("waiting 20 seconds then creating new connection")
+                    # Check for empty bytes - indicates connection closed gracefully (common on Linux/WSL)
+                    if not tmp:
+                        self.logger.warning("Connection closed: received empty bytes from socket")
+                        time.sleep(20)
+                        self._s_secondary = socket.create_connection(
+                            (self.host, self.secondary_port), timeout=60
+                        )
+                        self._dataqueue = bytes()  # Clear corrupted data queue
+                        continue
+                except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError) as e:
+                    # Catch all socket-related errors (different exceptions on Windows vs Linux)
+                    self.logger.warning("Connection error (%s): %s. Waiting 20 seconds then creating new connection", 
+                                      type(e).__name__, str(e))
                     time.sleep(20)
                     self._s_secondary = socket.create_connection(
                         (self.host, self.secondary_port), timeout=60 #Fred change, this used to be timeout=2
                     )
+                    self._dataqueue = bytes()  # Clear corrupted data queue
                     continue
-                    # pass
-                # else:
-                    # break
-                    # time.sleep(5)
-                    # if(i == 9):
-                    #     print("its so over")
-                    #     raise Exception("Connection Reset WinError")
-                # except KeyboardInterrupt:
-                #     self._s_secondary.close()
                 self._dataqueue += tmp
 
     def wait(self, timeout=60):
