@@ -342,6 +342,35 @@ class URRobot(object):
             jts["q_actual5"],
         ]
 
+    def get_inverse_kin(self, pose, qnear=None, maxPositionError=1e-10,
+                        maxOrientationError=1e-10, tcp='active_tcp'):
+        """
+        Calculate inverse kinematics for a given pose.
+        Returns joint positions that achieve the specified tool pose.
+        
+        Parameters:
+            pose: tool pose as list [x, y, z, rx, ry, rz]
+            qnear: list of joint positions for preferred solution (optional)
+            maxPositionError: maximum allowed position error (default 1e-10)
+            maxOrientationError: maximum allowed orientation error (default 1e-10)
+            tcp: tcp offset pose or 'active_tcp' string (default 'active_tcp')
+        
+        Returns:
+            list of 6 joint positions [j0, j1, j2, j3, j4, j5]
+        
+        Example:
+            pose = [0.1, 0.2, 0.2, 0, 3.14, 0]
+            joints = robot.get_inverse_kin(pose)
+            
+            # Get solution near current position
+            current_joints = robot.getj()
+            joints = robot.get_inverse_kin(pose, qnear=current_joints)
+        
+        See URScript get_inverse_kin() documentation for details.
+        """
+        return self.secmon.get_inverse_kin(pose, qnear, maxPositionError, 
+                                           maxOrientationError, tcp)
+
     def speedx(self, command, velocities, acc, min_time):
         vels = [round(i, self.max_float_length) for i in velocities]
         vels.append(acc)
@@ -375,11 +404,15 @@ class URRobot(object):
             return URRobot.getj(self)
 
     def movel(
-        self, tpose, acc=0.01, vel=0.01, wait=True, relative=False, threshold=None
+        self, tpose, acc=0.01, vel=0.01, wait=True, relative=False, threshold=None, type="pose"
     ):
         """
         Send a movel command to the robot. See URScript documentation.
+        type: "pose" for Cartesian pose (default), "joints" for joint positions
         """
+        # Map type to prefix for URScript command generation
+        prefix = "p" if type == "pose" else ""
+        
         return URRobot.movex(
             self,
             "movel",
@@ -389,6 +422,7 @@ class URRobot(object):
             wait=wait,
             relative=relative,
             threshold=threshold,
+            prefix=prefix,
         )
 
     def movep(
@@ -495,18 +529,23 @@ class URRobot(object):
         wait=True,
         relative=False,
         threshold=None,
+        prefix="p",
     ):
         """
         Send a move command to the robot. since UR robotene have several methods this one
         sends whatever is defined in 'command' string
+        prefix: "p" for pose (default), "" for joint positions
         """
         if relative:
             l = self.getl()
             tpose = [v + l[i] for i, v in enumerate(tpose)]
-        prog = self._format_move(command, tpose, acc, vel, prefix="p")
+        prog = self._format_move(command, tpose, acc, vel, prefix=prefix)
         self.send_program(prog)
         if wait:
-            self._wait_for_move(tpose[:6], threshold=threshold)
+            if prefix == "":
+                self._wait_for_move(tpose[:6], threshold=threshold, joints=True)
+            else:
+                self._wait_for_move(tpose[:6], threshold=threshold)
             return URRobot.getl(self)
 
     def getl(self, wait=False, _log=True):
@@ -575,7 +614,7 @@ class URRobot(object):
     def moveps(
         self, pose_list, acc=0.01, vel=0.01, radius=0.01, wait=True, threshold=None
     ):
-        # NOT NATIVE TO URX AND MADE BY FRED, EXPERIMENTAL!!!!!!!!!!!!!!!!!!
+        # NOT NATIVE TO URX
         """
         Concatenate several movep commands and applies a blending radius
         pose_list is a list of pose.
@@ -665,6 +704,189 @@ class URRobot(object):
             elif command == "movej":
                 self._wait_for_move(
                     target=pose_list[-1], threshold=threshold, joints=True
+                )
+            return URRobot.getl(self)
+
+    def movebatch(
+        self,
+        command_list,
+        pose_list,
+        acc=0.01,
+        vel=0.01,
+        radius=0.01,
+        type_list=None,
+        wait=True,
+        threshold=None,
+    ):
+        """
+        Concatenate several move commands of different types and applies blending radii.
+        
+        This method allows mixing movel, movep, movej, and movec commands in a single program.
+        Each command type can have its own pose/joints, velocity, acceleration, and blend radius.
+        
+        Args:
+            command_list: List of command types (e.g., ["movel", "movep", "movej", "movec"])
+            pose_list: List of poses or joint positions. For movec, provide (via_pose, to_pose) as a tuple
+            acc: Single acceleration value or list of accelerations (one per command)
+            vel: Single velocity value or list of velocities (one per command)
+            radius: Single blend radius value or list of radii (one per command)
+            type_list: Optional list specifying "pose" or "joints" for each command. 
+                      Only relevant for movel commands. None entries default to "pose".
+            wait: Wait for move completion
+            threshold: Distance threshold for move completion detection
+            
+        Example:
+            robot.movebatch(
+                command_list=["movel", "movep", "movep", "movel"],
+                pose_list=[joints1, pose2, pose3, pose4],
+                type_list=["joints", "pose", "pose", "pose"],
+                vel=[0.1, 0.2, 0.2, 0.1],
+                acc=[0.5, 0.3, 0.3, 0.5],
+                radius=[0.01, 0.02, 0.02, 0.0]
+            )
+        """
+        # Validate command_list
+        if not isinstance(command_list, Sequence) or isinstance(command_list, str):
+            raise RobotException('movebatch: "command_list" must be a list of command strings!')
+        
+        if len(command_list) == 0:
+            raise RobotException('movebatch: "command_list" cannot be empty!')
+        
+        # Validate pose_list length matches command_list
+        if len(pose_list) != len(command_list):
+            raise RobotException(
+                f'movebatch: "pose_list" length ({len(pose_list)}) must match '
+                f'"command_list" length ({len(command_list)})!'
+            )
+        
+        # Check if 'vel' is a single number or a sequence
+        if isinstance(vel, numbers.Number):
+            vel = len(command_list) * [vel]
+        elif not isinstance(vel, Sequence):
+            raise RobotException('movebatch: "vel" must be a single number or a sequence!')
+        
+        if len(vel) != len(command_list):
+            raise RobotException(
+                f'movebatch: "vel" must be a number or a list of numbers '
+                f'the same length as "command_list"!'
+            )
+        
+        # Check if 'acc' is a single number or a sequence
+        if isinstance(acc, numbers.Number):
+            acc = len(command_list) * [acc]
+        elif not isinstance(acc, Sequence):
+            raise RobotException('movebatch: "acc" must be a single number or a sequence!')
+        
+        if len(acc) != len(command_list):
+            raise RobotException(
+                f'movebatch: "acc" must be a number or a list of numbers '
+                f'the same length as "command_list"!'
+            )
+        
+        # Check if 'radius' is a single number or a sequence
+        if isinstance(radius, numbers.Number):
+            radius = len(command_list) * [radius]
+        elif not isinstance(radius, Sequence):
+            raise RobotException('movebatch: "radius" must be a single number or a sequence!')
+        
+        if len(radius) != len(command_list):
+            raise RobotException(
+                f'movebatch: "radius" must be a number or a list of numbers '
+                f'the same length as "command_list"!'
+            )
+        
+        # Ensure last radius is 0 (stopping pose)
+        radius = list(radius)  # Convert to list if tuple
+        radius[-1] = 0.0
+        
+        # Setup type_list if provided
+        if type_list is None:
+            type_list = ["pose"] * len(command_list)
+        elif not isinstance(type_list, Sequence):
+            raise RobotException('movebatch: "type_list" must be a list!')
+        
+        if len(type_list) != len(command_list):
+            raise RobotException(
+                f'movebatch: "type_list" length must match "command_list" length!'
+            )
+        
+        # Build the program
+        header = "def myProg():\n"
+        end = "end\n"
+        prog = header
+        
+        # Track last command for wait logic
+        last_command = command_list[-1]
+        last_pose = pose_list[-1]
+        last_is_joints = False
+        
+        for idx, command in enumerate(command_list):
+            pose = pose_list[idx]
+            cmd_type = type_list[idx] if type_list[idx] is not None else "pose"
+            
+            # Check if we need to insert a stopl before this command
+            # Insert stopl when transitioning between movel and movep
+            if idx > 0:
+                prev_command = command_list[idx-1]
+                if (prev_command == "movep" and command == "movel") or \
+                   (prev_command == "movel" and command == "movep"):
+                    prog += "stopl(1)\n"
+            
+            # Determine prefix based on command type and type_list
+            if command == "movel":
+                # movel can use either pose or joint coordinates
+                prefix = "" if cmd_type == "joints" else "p"
+                if idx == len(command_list) - 1:
+                    last_is_joints = (cmd_type == "joints")
+            elif command == "movep":
+                prefix = "p"
+            elif command == "movej":
+                prefix = ""
+                if idx == len(command_list) - 1:
+                    last_is_joints = True
+            elif command == "movec":
+                # movec requires two poses: via and to
+                # Expect pose to be a tuple of (via_pose, to_pose)
+                if not isinstance(pose, (tuple, list)) or len(pose) != 2:
+                    raise RobotException(
+                        f'movebatch: For movec command at index {idx}, pose must be '
+                        f'a tuple/list of (via_pose, to_pose)!'
+                    )
+                via_pose = [round(i, self.max_float_length) for i in pose[0]]
+                to_pose = [round(i, self.max_float_length) for i in pose[1]]
+                prog += f"movec(p{via_pose}, p{to_pose}, a={acc[idx]}, v={vel[idx]}, r={radius[idx]})\n"
+                continue  # Skip the normal _format_move call
+            else:
+                raise RobotException(
+                    f'movebatch: Unknown command "{command}" at index {idx}. '
+                    f'Supported commands: movel, movep, movej, movec'
+                )
+            
+            # Generate move command using existing helper
+            prog += (
+                self._format_move(
+                    command, pose, acc[idx], vel[idx], radius[idx], prefix=prefix
+                )
+                + "\n"
+            )
+        
+        prog += end
+        self.send_program(prog)
+        
+        if wait:
+            # Wait for the last movement to complete
+            if last_command == "movec":
+                # For movec, last_pose is a tuple, use the 'to' pose
+                self._wait_for_move(
+                    target=last_pose[1], threshold=threshold, joints=False
+                )
+            elif last_command in ["movel", "movep"]:
+                self._wait_for_move(
+                    target=last_pose, threshold=threshold, joints=last_is_joints
+                )
+            elif last_command == "movej":
+                self._wait_for_move(
+                    target=last_pose, threshold=threshold, joints=True
                 )
             return URRobot.getl(self)
 
