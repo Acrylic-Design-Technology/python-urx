@@ -17,6 +17,10 @@ from copy import copy
 import time
 # import traceback
 
+from urx.connection_utils import (
+    SocketConfig, StateReaderSocket, CommandSocket, IKQuerySocket
+)
+
 __author__ = "Olivier Roulet-Dubonnet"
 __copyright__ = "Copyright 2011-2013, Sintef Raufoss Manufacturing"
 __credits__ = ["Olivier Roulet-Dubonnet"]
@@ -555,16 +559,34 @@ class SecondaryMonitor(Thread):
         self._dictLock = Lock()
         self.host = host
         self.secondary_port = 30002  # Secondary client interface on Universal Robots
-        self._s_secondary = socket.create_connection(
-            (self.host, self.secondary_port), timeout=60 #Fred change, this used to be timeout=2
+        
+        # Initialize robust socket connections
+        self._socket_config = SocketConfig(
+            connect_timeout=1.0,
+            recv_timeout=0.3,
+            send_timeout=1.0,
+            tcp_nodelay=True,
+            so_keepalive=True,
+            missed_cycle_threshold=3
         )
-        self._prog_queue = []
-        self._prog_queue_lock = Lock()
+        
+        self._state_reader = StateReaderSocket(self.host, self.secondary_port, self._socket_config)
+        self._cmd_socket = CommandSocket(self.host, self.secondary_port, self._socket_config)
+        
+        # Connect both sockets
+        try:
+            self._state_reader.connect()
+            self._cmd_socket.connect()
+        except Exception as ex:
+            self.logger.error("Failed to initialize secondary sockets: %s", ex)
+            raise
+        
         self._dataqueue = bytes()
         self._trystop = False  # to stop thread
         self.running = False  # True when robot is on and listening
         self._dataEvent = Condition()
         self.lastpacket_timestamp = 0
+        self._last_health_log = time.time()
 
         self.start()
         try:
@@ -578,17 +600,17 @@ class SecondaryMonitor(Thread):
         send program to robot in URRobot format
         If another program is send while a program is running the first program is aborded.
         """
-        prog.strip()
-        self.logger.debug("Enqueueing program: %s", prog)
+        prog = prog.strip()
+        self.logger.debug("Sending program: %s", prog)
         if not isinstance(prog, bytes):
             prog = prog.encode()
-
-        data = Program(prog + b"\n")
-        with data.condition:
-            with self._prog_queue_lock:
-                self._prog_queue.append(data)
-            data.condition.wait()
-            self.logger.debug("program sendt: %s", data)
+        
+        # Send directly via command socket (non-blocking)
+        success = self._cmd_socket.send_command(prog)
+        if not success:
+            self.logger.error("Failed to send program to robot")
+        else:
+            self.logger.debug("Program sent successfully")
 
     def run(self):
         """
@@ -598,14 +620,16 @@ class SecondaryMonitor(Thread):
         so this is not guaranted and we cannot rely on information to the primary client.
         """
         while not self._trystop:
-            with self._prog_queue_lock:
-                if len(self._prog_queue) > 0:
-                    data = self._prog_queue.pop(0)
-                    self._s_secondary.send(data.program)
-                    with data.condition:
-                        data.condition.notify_all()
-
+            # Periodic health logging (every 10 minutes)
+            if time.time() - self._last_health_log > 600:
+                self._log_health_summary()
+                self._last_health_log = time.time()
+            
             data = self._get_data()
+            if not data:
+                # No data received, continue to next iteration
+                continue
+                
             try:
                 tmpdict = self._parser.parse(data)
                 with self._dictLock:
@@ -648,8 +672,9 @@ class SecondaryMonitor(Thread):
     def _get_data(self):
         """
         returns something that looks like a packet, nothing is guaranted
+        Returns None if no packet available
         """
-        while True:
+        while not self._trystop:
             # self.logger.debug("data queue size is: {}".format(len(self._dataqueue)))
             ans = self._parser.find_first_packet(self._dataqueue[:])
 
@@ -659,27 +684,11 @@ class SecondaryMonitor(Thread):
                 return ans[0]
             else:
                 # self.logger.debug("Could not find packet in received data")
-                try:
-                    tmp = self._s_secondary.recv(1024)
-                except ConnectionResetError:
-                    
-                    # print("bruh")
-                    # traceback.print_exc()
-                    print("waiting 20 seconds then creating new connection")
-                    time.sleep(20)
-                    self._s_secondary = socket.create_connection(
-                        (self.host, self.secondary_port), timeout=60 #Fred change, this used to be timeout=2
-                    )
-                    continue
-                    # pass
-                # else:
-                    # break
-                    # time.sleep(5)
-                    # if(i == 9):
-                    #     print("its so over")
-                    #     raise Exception("Connection Reset WinError")
-                # except KeyboardInterrupt:
-                #     self._s_secondary.close()
+                tmp = self._state_reader.recv_data(1024)
+                if tmp is None:
+                    # Timeout or error, socket will auto-reconnect if needed
+                    # Return None to allow loop to continue
+                    return None
                 self._dataqueue += tmp
 
     def wait(self, timeout=60):
@@ -781,6 +790,34 @@ class SecondaryMonitor(Thread):
             self.wait()
         with self._dictLock:
             return self._dict["RobotModeData"]["isProgramRunning"]
+    
+    def _log_health_summary(self):
+        """Log connection health metrics."""
+        state_stats = self._state_reader.get_stats()
+        cmd_stats = self._cmd_socket.get_stats()
+        
+        self.logger.info(
+            "Secondary connection health - StateReader: "
+            "connects=%d, disconnects=%d, timeouts=%d, missed_cycles=%d, "
+            "avg_recv_ms=%.2f",
+            state_stats['total_connects'],
+            state_stats['total_disconnects'],
+            state_stats['timeout_count'],
+            state_stats['missed_cycles'],
+            state_stats['avg_recv_duration_ms']
+        )
+        
+        self.logger.info(
+            "Secondary connection health - CommandSocket: "
+            "connects=%d, disconnects=%d",
+            cmd_stats['total_connects'],
+            cmd_stats['total_disconnects']
+        )
+        
+        if state_stats['disconnect_reasons']:
+            self.logger.debug("StateReader disconnect reasons: %s", state_stats['disconnect_reasons'])
+        if cmd_stats['disconnect_reasons']:
+            self.logger.debug("CommandSocket disconnect reasons: %s", cmd_stats['disconnect_reasons'])
 
     def get_inverse_kin(self, pose, qnear=None, maxPositionError=1e-10, 
                         maxOrientationError=1e-10, tcp='active_tcp'):
@@ -801,6 +838,9 @@ class SecondaryMonitor(Thread):
         Raises:
             Exception if no IK solution found or timeout
         """
+        # Create a dedicated IK query socket
+        ik_socket = IKQuerySocket(self.host, self.secondary_port, self._socket_config)
+        
         # Create a temporary server socket to receive the result
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -812,38 +852,49 @@ class SecondaryMonitor(Thread):
         port = server_socket.getsockname()[1]
         
         # Get local IP address that the robot can reach
-        # Use the existing socket connection to determine our local IP
-        local_ip = self._s_secondary.getsockname()[0]
+        # Create a temporary connection to determine our local IP
+        try:
+            temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            temp_sock.connect((self.host, self.secondary_port))
+            local_ip = temp_sock.getsockname()[0]
+            temp_sock.close()
+        except Exception:
+            # Fallback to using host as the IP
+            local_ip = self.host
         
         self.logger.debug("Listening for IK result on %s:%s", local_ip, port)
         
+        client_socket = None
         try:
+            # Connect the IK socket
+            ik_socket.connect()
+            
             # Format pose as URScript pose
-            pose_str = "p[{},{},{},{},{},{}]".format(*pose)
+            pose_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*pose)
             
             # Build URScript program
             prog_lines = []
             
             # Call get_inverse_kin with appropriate parameters
             if qnear is not None:
-                qnear_str = "[{},{},{},{},{},{}]".format(*qnear)
+                qnear_str = "[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*qnear)
                 if tcp == 'active_tcp':
-                    ik_call = "get_inverse_kin({}, {}, {}, {})".format(
+                    ik_call = "get_inverse_kin({}, {}, {:.10f}, {:.10f})".format(
                         pose_str, qnear_str, maxPositionError, maxOrientationError
                     )
                 else:
-                    tcp_str = "p[{},{},{},{},{},{}]".format(*tcp)
-                    ik_call = "get_inverse_kin({}, {}, {}, {}, {})".format(
+                    tcp_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*tcp)
+                    ik_call = "get_inverse_kin({}, {}, {:.10f}, {:.10f}, {})".format(
                         pose_str, qnear_str, maxPositionError, maxOrientationError, tcp_str
                     )
             else:
                 if tcp == 'active_tcp':
-                    ik_call = "get_inverse_kin({}, maxPositionError={}, maxOrientationError={})".format(
+                    ik_call = "get_inverse_kin({}, maxPositionError={:.10f}, maxOrientationError={:.10f})".format(
                         pose_str, maxPositionError, maxOrientationError
                     )
                 else:
-                    tcp_str = "p[{},{},{},{},{},{}]".format(*tcp)
-                    ik_call = "get_inverse_kin({}, maxPositionError={}, maxOrientationError={}, tcp={})".format(
+                    tcp_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*tcp)
+                    ik_call = "get_inverse_kin({}, maxPositionError={:.10f}, maxOrientationError={:.10f}, tcp={})".format(
                         pose_str, maxPositionError, maxOrientationError, tcp_str
                     )
             
@@ -861,10 +912,11 @@ class SecondaryMonitor(Thread):
             prog_lines.append("get_ik_program()")
             
             prog = "\n".join(prog_lines)
-            self.logger.debug("Sending IK program: %s", prog)
+            self.logger.debug("Sending IK program via dedicated socket: %s", prog)
             
-            # Send the program
-            self.send_program(prog)
+            # Send the program via dedicated IK socket
+            if not ik_socket.send_query(prog):
+                raise Exception("Failed to send IK query to robot")
             
             # Wait for connection from robot
             self.logger.debug("Waiting for robot to connect...")
@@ -901,13 +953,163 @@ class SecondaryMonitor(Thread):
             self.logger.error("Error getting inverse kinematics: %s", ex)
             raise
         finally:
+            if client_socket:
+                try:
+                    client_socket.close()
+                except:
+                    pass
             server_socket.close()
+            ik_socket.close()
+
+    def get_inverse_kin_has_solution(self, pose, qnear=None, maxPositionError=1e-10,
+                                       maxOrientationError=1e-10, tcp='active_tcp'):
+        """
+        Check if get_inverse_kin has a solution for a given pose.
+        Returns boolean (True) or (False).
+        
+        Parameters:
+            pose: tool pose as list [x, y, z, rx, ry, rz]
+            qnear: list of joint positions for preferred solution (optional)
+            maxPositionError: maximum allowed position error (default 1e-10)
+            maxOrientationError: maximum allowed orientation error (default 1e-10)
+            tcp: tcp offset pose or 'active_tcp' string (default 'active_tcp')
+        
+        Returns:
+            bool: True if IK solution exists, False otherwise
+        
+        Raises:
+            Exception if timeout or communication error
+        """
+        # Create a dedicated IK query socket
+        ik_socket = IKQuerySocket(self.host, self.secondary_port, self._socket_config)
+        
+        # Create a temporary server socket to receive the result
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(('', 0))  # Bind to any available port
+        server_socket.listen(1)
+        server_socket.settimeout(5.0)  # 5 second timeout
+        
+        # Get the assigned port
+        port = server_socket.getsockname()[1]
+        
+        # Get local IP address that the robot can reach
+        # Create a temporary connection to determine our local IP
+        try:
+            temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            temp_sock.connect((self.host, self.secondary_port))
+            local_ip = temp_sock.getsockname()[0]
+            temp_sock.close()
+        except Exception:
+            # Fallback to using host as the IP
+            local_ip = self.host
+        
+        self.logger.debug("Listening for IK solution check on %s:%s", local_ip, port)
+        
+        client_socket = None
+        try:
+            # Connect the IK socket
+            ik_socket.connect()
+            
+            # Format pose as URScript pose
+            pose_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*pose)
+            
+            # Build URScript program
+            prog_lines = []
+            
+            # Call get_inverse_kin_has_solution with appropriate parameters
+            if qnear is not None:
+                qnear_str = "[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*qnear)
+                if tcp == 'active_tcp':
+                    ik_call = "get_inverse_kin_has_solution({}, {}, {:.10f}, {:.10f})".format(
+                        pose_str, qnear_str, maxPositionError, maxOrientationError
+                    )
+                else:
+                    tcp_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*tcp)
+                    ik_call = "get_inverse_kin_has_solution({}, {}, {:.10f}, {:.10f}, {})".format(
+                        pose_str, qnear_str, maxPositionError, maxOrientationError, tcp_str
+                    )
+            else:
+                if tcp == 'active_tcp':
+                    ik_call = "get_inverse_kin_has_solution({}, maxPositionError={:.10f}, maxOrientationError={:.10f})".format(
+                        pose_str, maxPositionError, maxOrientationError
+                    )
+                else:
+                    tcp_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*tcp)
+                    ik_call = "get_inverse_kin_has_solution({}, maxPositionError={:.10f}, maxOrientationError={:.10f}, tcp={})".format(
+                        pose_str, maxPositionError, maxOrientationError, tcp_str
+                    )
+            
+            prog_lines.append("def check_ik_program():")
+            prog_lines.append("  has_solution = {}".format(ik_call))
+            prog_lines.append("  socket_open(\"{}\", {})".format(local_ip, port))
+            prog_lines.append("  socket_send_line(has_solution)")
+            prog_lines.append("  socket_close()")
+            prog_lines.append("end")
+            prog_lines.append("check_ik_program()")
+            
+            prog = "\n".join(prog_lines)
+            self.logger.debug("Sending IK solution check program via dedicated socket: %s", prog)
+            
+            # Send the program via dedicated IK socket
+            if not ik_socket.send_query(prog):
+                raise Exception("Failed to send IK solution check query to robot")
+            
+            # Wait for connection from robot
+            self.logger.debug("Waiting for robot to connect...")
+            client_socket, addr = server_socket.accept()
+            self.logger.debug("Robot connected from %s", addr)
+            
+            # Receive the boolean result
+            client_socket.settimeout(2.0)
+            data = b""
+            
+            # Read until we get a newline
+            while b"\n" not in data:
+                chunk = client_socket.recv(1024)
+                if not chunk:
+                    raise Exception("Connection closed before receiving solution check result")
+                data += chunk
+            
+            # Extract the result
+            line = data.split(b"\n", 1)[0]
+            result_str = line.decode().strip().lower()
+            
+            # URScript returns "True" or "False" as strings
+            has_solution = result_str == "true"
+            
+            client_socket.close()
+            self.logger.debug("IK solution check result: %s", has_solution)
+            return has_solution
+            
+        except socket.timeout:
+            self.logger.error("Timeout waiting for IK solution check result")
+            raise Exception("Timeout waiting for inverse kinematics solution check result")
+        except Exception as ex:
+            self.logger.error("Error checking inverse kinematics solution: %s", ex)
+            raise
+        finally:
+            if client_socket:
+                try:
+                    client_socket.close()
+                except:
+                    pass
+            server_socket.close()
+            ik_socket.close()
 
     def close(self):
         self._trystop = True
         self.join()
         # with self._dataEvent: #wake up any thread that may be waiting for data before we close. Should we do that?
         # self._dataEvent.notifyAll()
-        if self._s_secondary:
-            with self._prog_queue_lock:
-                self._s_secondary.close()
+        
+        # Close both sockets
+        try:
+            self._state_reader.close()
+        except Exception as ex:
+            self.logger.debug("Error closing state reader: %s", ex)
+        
+        try:
+            self._cmd_socket.close()
+        except Exception as ex:
+            self.logger.debug("Error closing command socket: %s", ex)

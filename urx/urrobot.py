@@ -165,7 +165,8 @@ class URRobot(object):
         """
         set robot flange to tool tip transformation
         """
-        prog = "set_tcp(p[{}, {}, {}, {}, {}, {}])".format(*tcp)
+        # Format floats explicitly to avoid scientific notation
+        prog = "set_tcp(p[{:.6f}, {:.6f}, {:.6f}, {:.6f}, {:.6f}, {:.6f}])".format(*tcp)
         self.send_program(prog)
 
     def set_payload(self, weight, cog=None):
@@ -175,11 +176,10 @@ class URRobot(object):
         if cog is not specified, then tool center point is used
         """
         if cog:
-            cog = list(cog)
-            cog.insert(0, weight)
-            prog = "set_payload({}, ({},{},{}))".format(*cog)
+            # Format floats explicitly to avoid scientific notation
+            prog = "set_payload({:.6f}, ({:.6f},{:.6f},{:.6f}))".format(weight, *cog)
         else:
-            prog = "set_payload(%s)" % weight
+            prog = "set_payload({:.6f})".format(weight)
         self.send_program(prog)
 
     def set_gravity(self, vector):
@@ -371,11 +371,46 @@ class URRobot(object):
         return self.secmon.get_inverse_kin(pose, qnear, maxPositionError, 
                                            maxOrientationError, tcp)
 
+    def get_inverse_kin_has_solution(self, pose, qnear=None, maxPositionError=1e-10,
+                                       maxOrientationError=1e-10, tcp='active_tcp'):
+        """
+        Check if inverse kinematics has a solution for a given pose.
+        Returns boolean (True) or (False).
+        This can be used to avoid the runtime exception of get_inverse_kin
+        when no solution exists.
+        
+        Parameters:
+            pose: tool pose as list [x, y, z, rx, ry, rz]
+            qnear: list of joint positions for preferred solution (optional)
+            maxPositionError: maximum allowed position error (default 1e-10)
+            maxOrientationError: maximum allowed orientation error (default 1e-10)
+            tcp: tcp offset pose or 'active_tcp' string (default 'active_tcp')
+        
+        Returns:
+            bool: True if get_inverse_kin has a solution, False otherwise
+        
+        Example:
+            pose = [0.1, 0.2, 0.2, 0, 3.14, 0]
+            if robot.get_inverse_kin_has_solution(pose):
+                joints = robot.get_inverse_kin(pose)
+                robot.movej(joints)
+            else:
+                print("No IK solution available for this pose")
+            
+            # Check solution near current position
+            current_joints = robot.getj()
+            if robot.get_inverse_kin_has_solution(pose, qnear=current_joints):
+                joints = robot.get_inverse_kin(pose, qnear=current_joints)
+        
+        See URScript get_inverse_kin_has_solution() documentation for details.
+        """
+        return self.secmon.get_inverse_kin_has_solution(pose, qnear, maxPositionError,
+                                                          maxOrientationError, tcp)
+
     def speedx(self, command, velocities, acc, min_time):
-        vels = [round(i, self.max_float_length) for i in velocities]
-        vels.append(acc)
-        vels.append(min_time)
-        prog = "{}([{},{},{},{},{},{}], {}, {})".format(command, *vels)
+        # Format floats explicitly to avoid scientific notation
+        vels = ["{:.6f}".format(i) for i in velocities]
+        prog = "{}([{},{},{},{},{},{}], {:.6f}, {:.6f})".format(command, *vels, acc, min_time)
         self.send_program(prog)
 
     def movej(
@@ -501,23 +536,17 @@ class URRobot(object):
         gain=100,
         prefix="",
     ):
-        tjoints = [round(i, self.max_float_length) for i in tjoints]
-        tjoints.append(acc)
-        tjoints.append(vel)
-        tjoints.append(t)
-        tjoints.append(lookahead_time)
-        tjoints.append(gain)
-        return "{}({}[{},{},{},{},{},{}], a={}, v={}, t={}, lookahead_time={}, gain={})".format(
-            command, prefix, *tjoints
+        # Format floats explicitly to avoid scientific notation
+        tjoints_formatted = ["{:.6f}".format(i) for i in tjoints]
+        return "{}({}[{},{},{},{},{},{}], a={:.6f}, v={:.6f}, t={:.6f}, lookahead_time={:.6f}, gain={})".format(
+            command, prefix, *tjoints_formatted, acc, vel, t, lookahead_time, int(gain)
         )
 
     def _format_move(self, command, tpose, acc, vel, radius=0, prefix=""):
-        tpose = [round(i, self.max_float_length) for i in tpose]
-        tpose.append(acc)
-        tpose.append(vel)
-        tpose.append(radius)
-        return "{}({}[{},{},{},{},{},{}], a={}, v={}, r={})".format(
-            command, prefix, *tpose
+        # Format floats explicitly to avoid scientific notation
+        tpose_formatted = ["{:.6f}".format(i) for i in tpose]
+        return "{}({}[{},{},{},{},{},{}], a={:.6f}, v={:.6f}, r={:.6f})".format(
+            command, prefix, *tpose_formatted, acc, vel, radius
         )
 
     def movex(
@@ -564,9 +593,12 @@ class URRobot(object):
         Move Circular: Move to position (circular in tool-space)
         see UR documentation
         """
-        pose_via = [round(i, self.max_float_length) for i in pose_via]
-        pose_to = [round(i, self.max_float_length) for i in pose_to]
-        prog = "movec(p%s, p%s, a=%s, v=%s, r=%s)" % (pose_via, pose_to, acc, vel, "0")
+        # Format floats explicitly to avoid scientific notation
+        pose_via_fmt = ["{:.6f}".format(i) for i in pose_via]
+        pose_to_fmt = ["{:.6f}".format(i) for i in pose_to]
+        prog = "movec(p[{},{},{},{},{},{}], p[{},{},{},{},{},{}], a={:.6f}, v={:.6f}, r=0)".format(
+            *pose_via_fmt, *pose_to_fmt, acc, vel
+        )
         self.send_program(prog)
         if wait:
             self._wait_for_move(pose_to, threshold=threshold)
@@ -852,9 +884,12 @@ class URRobot(object):
                         f'movebatch: For movec command at index {idx}, pose must be '
                         f'a tuple/list of (via_pose, to_pose)!'
                     )
-                via_pose = [round(i, self.max_float_length) for i in pose[0]]
-                to_pose = [round(i, self.max_float_length) for i in pose[1]]
-                prog += f"movec(p{via_pose}, p{to_pose}, a={acc[idx]}, v={vel[idx]}, r={radius[idx]})\n"
+                # Format floats explicitly to avoid scientific notation
+                via_pose_fmt = ["{:.6f}".format(i) for i in pose[0]]
+                to_pose_fmt = ["{:.6f}".format(i) for i in pose[1]]
+                prog += "movec(p[{},{},{},{},{},{}], p[{},{},{},{},{},{}], a={:.6f}, v={:.6f}, r={:.6f})\n".format(
+                    *via_pose_fmt, *to_pose_fmt, acc[idx], vel[idx], radius[idx]
+                )
                 continue  # Skip the normal _format_move call
             else:
                 raise RobotException(
@@ -907,6 +942,35 @@ class URRobot(object):
         self.secmon.close()
         if self.rtmon:
             self.rtmon.stop()
+    
+    def get_connection_stats(self):
+        """
+        Return dictionary of connection health metrics.
+        
+        Returns:
+            dict: Connection statistics with keys:
+                - 'state_reader': StateReaderSocket statistics
+                - 'command_socket': CommandSocket statistics
+        
+        Example:
+            stats = robot.get_connection_stats()
+            print(f"State reader connects: {stats['state_reader']['total_connects']}")
+            print(f"Command socket timeouts: {stats['command_socket']['timeout_count']}")
+        """
+        return {
+            'state_reader': self.secmon._state_reader.get_stats(),
+            'command_socket': self.secmon._cmd_socket.get_stats(),
+        }
+    
+    def reset_connection_stats(self):
+        """
+        Reset all connection metrics counters.
+        
+        Useful for monitoring connection health over specific time periods
+        or after recovering from connection issues.
+        """
+        self.secmon._state_reader.reset_stats()
+        self.secmon._cmd_socket.reset_stats()
 
     def set_freedrive(self, val, timeout=60):
         """
