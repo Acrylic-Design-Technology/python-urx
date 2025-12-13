@@ -862,7 +862,7 @@ class URRobot(object):
                 prev_command = command_list[idx-1]
                 if (prev_command == "movep" and command == "movel") or \
                    (prev_command == "movel" and command == "movep"):
-                    prog += "stopl(1)\n"
+                    prog += "stopl(0.5)\n"
             
             # Determine prefix based on command type and type_list
             if command == "movel":
@@ -948,19 +948,14 @@ class URRobot(object):
         Return dictionary of connection health metrics.
         
         Returns:
-            dict: Connection statistics with keys:
-                - 'state_reader': StateReaderSocket statistics
-                - 'command_socket': CommandSocket statistics
+            dict: Connection statistics including connects, disconnects, timeouts, etc.
         
         Example:
             stats = robot.get_connection_stats()
-            print(f"State reader connects: {stats['state_reader']['total_connects']}")
-            print(f"Command socket timeouts: {stats['command_socket']['timeout_count']}")
+            print(f"Total connects: {stats['total_connects']}")
+            print(f"Timeouts: {stats['timeout_count']}")
         """
-        return {
-            'state_reader': self.secmon._state_reader.get_stats(),
-            'command_socket': self.secmon._cmd_socket.get_stats(),
-        }
+        return self.secmon._robust_socket.get_stats()
     
     def reset_connection_stats(self):
         """
@@ -969,8 +964,7 @@ class URRobot(object):
         Useful for monitoring connection health over specific time periods
         or after recovering from connection issues.
         """
-        self.secmon._state_reader.reset_stats()
-        self.secmon._cmd_socket.reset_stats()
+        self.secmon._robust_socket.reset_stats()
 
     def set_freedrive(self, val, timeout=60):
         """

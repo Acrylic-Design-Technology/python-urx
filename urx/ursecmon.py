@@ -570,15 +570,14 @@ class SecondaryMonitor(Thread):
             missed_cycle_threshold=3
         )
         
-        self._state_reader = StateReaderSocket(self.host, self.secondary_port, self._socket_config)
-        self._cmd_socket = CommandSocket(self.host, self.secondary_port, self._socket_config)
+        # Use a single robust socket for both reading and writing (UR robots expect ONE client)
+        self._robust_socket = StateReaderSocket(self.host, self.secondary_port, self._socket_config)
         
-        # Connect both sockets
+        # Connect socket
         try:
-            self._state_reader.connect()
-            self._cmd_socket.connect()
+            self._robust_socket.connect()
         except Exception as ex:
-            self.logger.error("Failed to initialize secondary sockets: %s", ex)
+            self.logger.error("Failed to initialize secondary socket: %s", ex)
             raise
         
         self._prog_queue = []
@@ -628,19 +627,25 @@ class SecondaryMonitor(Thread):
             with self._prog_queue_lock:
                 if len(self._prog_queue) > 0:
                     data = self._prog_queue.pop(0)
-                    # Send via command socket
-                    success = self._cmd_socket.send_command(data.program)
-                    # Notify sender that program was sent
+                    # Send via the single robust socket (ensures "primary client" status)
+                    try:
+                        if self._robust_socket._socket and self._robust_socket.is_connected():
+                            # Send directly to maintain single-socket behavior
+                            self._robust_socket._socket.send(data.program)
+                        else:
+                            self.logger.error("Socket not connected when trying to send program")
+                    except Exception as ex:
+                        self.logger.error("Failed to send queued program: %s", ex)
+                    # Notify sender that send was attempted
                     with data.condition:
                         data.condition.notify_all()
-                    if not success:
-                        self.logger.error("Failed to send queued program")
             
             # Periodic health logging (every 10 minutes)
             if time.time() - self._last_health_log > 600:
                 self._log_health_summary()
                 self._last_health_log = time.time()
             
+            # Read state data from the same socket
             data = self._get_data()
             if not data:
                 # No data received, continue to next iteration
@@ -700,7 +705,7 @@ class SecondaryMonitor(Thread):
                 return ans[0]
             else:
                 # self.logger.debug("Could not find packet in received data")
-                tmp = self._state_reader.recv_data(1024)
+                tmp = self._robust_socket.recv_data(1024)
                 if tmp is None:
                     # Timeout or error, socket will auto-reconnect if needed
                     # Return None to allow loop to continue
@@ -809,31 +814,21 @@ class SecondaryMonitor(Thread):
     
     def _log_health_summary(self):
         """Log connection health metrics."""
-        state_stats = self._state_reader.get_stats()
-        cmd_stats = self._cmd_socket.get_stats()
+        stats = self._robust_socket.get_stats()
         
         self.logger.info(
-            "Secondary connection health - StateReader: "
+            "Secondary connection health: "
             "connects=%d, disconnects=%d, timeouts=%d, missed_cycles=%d, "
             "avg_recv_ms=%.2f",
-            state_stats['total_connects'],
-            state_stats['total_disconnects'],
-            state_stats['timeout_count'],
-            state_stats['missed_cycles'],
-            state_stats['avg_recv_duration_ms']
+            stats['total_connects'],
+            stats['total_disconnects'],
+            stats['timeout_count'],
+            stats['missed_cycles'],
+            stats['avg_recv_duration_ms']
         )
         
-        self.logger.info(
-            "Secondary connection health - CommandSocket: "
-            "connects=%d, disconnects=%d",
-            cmd_stats['total_connects'],
-            cmd_stats['total_disconnects']
-        )
-        
-        if state_stats['disconnect_reasons']:
-            self.logger.debug("StateReader disconnect reasons: %s", state_stats['disconnect_reasons'])
-        if cmd_stats['disconnect_reasons']:
-            self.logger.debug("CommandSocket disconnect reasons: %s", cmd_stats['disconnect_reasons'])
+        if stats['disconnect_reasons']:
+            self.logger.debug("Disconnect reasons: %s", stats['disconnect_reasons'])
 
     def get_inverse_kin(self, pose, qnear=None, maxPositionError=1e-10, 
                         maxOrientationError=1e-10, tcp='active_tcp'):
@@ -1119,13 +1114,8 @@ class SecondaryMonitor(Thread):
         # with self._dataEvent: #wake up any thread that may be waiting for data before we close. Should we do that?
         # self._dataEvent.notifyAll()
         
-        # Close both sockets
+        # Close the socket
         try:
-            self._state_reader.close()
+            self._robust_socket.close()
         except Exception as ex:
-            self.logger.debug("Error closing state reader: %s", ex)
-        
-        try:
-            self._cmd_socket.close()
-        except Exception as ex:
-            self.logger.debug("Error closing command socket: %s", ex)
+            self.logger.debug("Error closing robust socket: %s", ex)
