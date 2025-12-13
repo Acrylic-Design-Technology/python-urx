@@ -581,6 +581,8 @@ class SecondaryMonitor(Thread):
             self.logger.error("Failed to initialize secondary sockets: %s", ex)
             raise
         
+        self._prog_queue = []
+        self._prog_queue_lock = Lock()
         self._dataqueue = bytes()
         self._trystop = False  # to stop thread
         self.running = False  # True when robot is on and listening
@@ -601,16 +603,18 @@ class SecondaryMonitor(Thread):
         If another program is send while a program is running the first program is aborded.
         """
         prog = prog.strip()
-        self.logger.debug("Sending program: %s", prog)
+        self.logger.debug("Enqueueing program: %s", prog)
         if not isinstance(prog, bytes):
             prog = prog.encode()
         
-        # Send directly via command socket (non-blocking)
-        success = self._cmd_socket.send_command(prog)
-        if not success:
-            self.logger.error("Failed to send program to robot")
-        else:
-            self.logger.debug("Program sent successfully")
+        # Create Program wrapper with condition for synchronization
+        data = Program(prog + b"\n")
+        with data.condition:
+            with self._prog_queue_lock:
+                self._prog_queue.append(data)
+            # Wait until run() loop sends it and notifies us
+            data.condition.wait()
+            self.logger.debug("Program sent: %s", data)
 
     def run(self):
         """
@@ -620,6 +624,18 @@ class SecondaryMonitor(Thread):
         so this is not guaranted and we cannot rely on information to the primary client.
         """
         while not self._trystop:
+            # Process program queue first
+            with self._prog_queue_lock:
+                if len(self._prog_queue) > 0:
+                    data = self._prog_queue.pop(0)
+                    # Send via command socket
+                    success = self._cmd_socket.send_command(data.program)
+                    # Notify sender that program was sent
+                    with data.condition:
+                        data.condition.notify_all()
+                    if not success:
+                        self.logger.error("Failed to send queued program")
+            
             # Periodic health logging (every 10 minutes)
             if time.time() - self._last_health_log > 600:
                 self._log_health_summary()
