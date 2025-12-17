@@ -877,7 +877,9 @@ class URRobot(object):
                 if idx == len(command_list) - 1:
                     last_is_joints = (cmd_type == "joints")
             elif command == "movep":
-                prefix = "p"
+                prefix = "" if cmd_type == "joints" else "p"
+                if idx == len(command_list) - 1:
+                    last_is_joints = (cmd_type == "joints")
             elif command == "movej":
                 prefix = ""
                 if idx == len(command_list) - 1:
