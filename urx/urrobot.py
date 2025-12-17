@@ -860,7 +860,8 @@ class URRobot(object):
             # Insert stopl when transitioning between movel and movep
             if idx > 0:
                 prev_command = command_list[idx-1]
-                if (prev_command == "movep" and command == "movel") or \
+                if (prev_command == "movej" and command == "movep") or \
+                   (prev_command == "movep" and command == "movel") or \
                    (prev_command == "movel" and command == "movep"):
                     prog += "stopl(0.5)\n"
             
