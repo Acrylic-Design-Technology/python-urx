@@ -461,11 +461,15 @@ class URRobot(object):
         )
 
     def movep(
-        self, tpose, acc=0.01, vel=0.01, wait=True, relative=False, threshold=None
+        self, tpose, acc=0.01, vel=0.01, wait=True, relative=False, threshold=None, type="pose"
     ):
         """
         Send a movep command to the robot. See URScript documentation.
+        type: "pose" for Cartesian pose (default), "joints" for joint positions
         """
+        # Map type to prefix for URScript command generation
+        prefix = "p" if type == "pose" else ""
+        
         return URRobot.movex(
             self,
             "movep",
@@ -475,6 +479,7 @@ class URRobot(object):
             wait=wait,
             relative=relative,
             threshold=threshold,
+            prefix=prefix,
         )
 
     def servoc(
