@@ -861,14 +861,14 @@ class URRobot(object):
             pose = pose_list[idx]
             cmd_type = type_list[idx] if type_list[idx] is not None else "pose"
             
-            # Check if we need to insert a stopl before this command
-            # Insert stopl when transitioning between movel and movep
+            # Set previous waypoint radius to 0 when transitioning between command types
+            # This forces a complete stop before the new command type
             if idx > 0:
                 prev_command = command_list[idx-1]
                 if (prev_command == "movej" and command == "movep") or \
                    (prev_command == "movep" and command == "movel") or \
                    (prev_command == "movel" and command == "movep"):
-                    prog += "stopl(0.5)\n"
+                    radius[idx-1] = 0
             
             # Determine prefix based on command type and type_list
             if command == "movel":
@@ -912,7 +912,7 @@ class URRobot(object):
                 )
                 + "\n"
             )
-        
+        print("This is the program: ", prog)
         prog += end
         self.send_program(prog)
         
