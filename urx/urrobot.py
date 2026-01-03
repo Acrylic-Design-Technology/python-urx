@@ -861,14 +861,15 @@ class URRobot(object):
             pose = pose_list[idx]
             cmd_type = type_list[idx] if type_list[idx] is not None else "pose"
             
-            # Set previous waypoint radius to 0 when transitioning between command types
-            # This forces a complete stop before the new command type
-            if idx > 0:
-                prev_command = command_list[idx-1]
-                if (prev_command == "movej" and command == "movep") or \
-                   (prev_command == "movep" and command == "movel") or \
-                   (prev_command == "movel" and command == "movep"):
-                    radius[idx-1] = 0
+            # Check if next command is different type (requires stopping)
+            # Set radius to 0 when transitioning between command types
+            current_radius = radius[idx]
+            if idx < len(command_list) - 1:
+                next_command = command_list[idx + 1]
+                if (command == "movej" and next_command == "movep") or \
+                   (command == "movep" and next_command == "movel") or \
+                   (command == "movel" and next_command == "movep"):
+                    current_radius = 0
             
             # Determine prefix based on command type and type_list
             if command == "movel":
@@ -896,7 +897,7 @@ class URRobot(object):
                 via_pose_fmt = ["{:.6f}".format(i) for i in pose[0]]
                 to_pose_fmt = ["{:.6f}".format(i) for i in pose[1]]
                 prog += "movec(p[{},{},{},{},{},{}], p[{},{},{},{},{},{}], a={:.6f}, v={:.6f}, r={:.6f})\n".format(
-                    *via_pose_fmt, *to_pose_fmt, acc[idx], vel[idx], radius[idx]
+                    *via_pose_fmt, *to_pose_fmt, acc[idx], vel[idx], current_radius
                 )
                 continue  # Skip the normal _format_move call
             else:
@@ -908,7 +909,7 @@ class URRobot(object):
             # Generate move command using existing helper
             prog += (
                 self._format_move(
-                    command, pose, acc[idx], vel[idx], radius[idx], prefix=prefix
+                    command, pose, acc[idx], vel[idx], current_radius, prefix=prefix
                 )
                 + "\n"
             )
