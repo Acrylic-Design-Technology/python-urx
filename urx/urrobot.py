@@ -867,8 +867,11 @@ class URRobot(object):
             if idx < len(command_list) - 1:
                 next_command = command_list[idx + 1]
                 if (command == "movej" and next_command == "movep") or \
+                   (command == "movej" and next_command == "movel") or \
                    (command == "movep" and next_command == "movel") or \
-                   (command == "movel" and next_command == "movep"):
+                   (command == "movep" and next_command == "movej") or \
+                   (command == "movel" and next_command == "movep") or \
+                   (command == "movel" and next_command == "movej"):
                     current_radius = 0
             
             # Determine prefix based on command type and type_list
