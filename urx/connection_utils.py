@@ -23,6 +23,11 @@ __author__ = "Walker"
 __license__ = "LGPLv3"
 
 
+class ConnectionTimeoutException(Exception):
+    """Raised when reconnection attempts exceed the timeout budget."""
+    pass
+
+
 @dataclass
 class SocketConfig:
     """Configuration for socket connection behavior."""
@@ -32,6 +37,8 @@ class SocketConfig:
     tcp_nodelay: bool = True
     so_keepalive: bool = True
     missed_cycle_threshold: int = 3  # Consecutive timeouts before reconnect
+    max_reconnect_duration: float = 30.0  # Total time budget for reconnection
+    command_retry: bool = True  # Enable automatic command retry
 
 
 @dataclass
@@ -181,6 +188,8 @@ class RobustSocket:
         self._stats = ConnectionStats()
         
         self._last_monotonic = time.monotonic()
+        self._reconnect_start_time: Optional[float] = None
+        self._max_reconnect_duration = config.max_reconnect_duration
         
     def connect(self):
         """Establish connection to robot."""
@@ -204,6 +213,7 @@ class RobustSocket:
                 self._backoff.reset()
                 self._stats.record_connect()
                 self._last_monotonic = time.monotonic()
+                self._reconnect_start_time = None  # Reset timeout budget on success
                 
                 self.logger.debug("%s: Connected successfully", self.name)
                 
@@ -245,9 +255,27 @@ class RobustSocket:
         return False
     
     def _reconnect(self):
-        """Perform reconnection with backoff."""
+        """Perform reconnection with backoff.
+        
+        Raises:
+            ConnectionTimeoutException: If reconnection attempts exceed max_reconnect_duration
+        """
+        # Start tracking reconnection time on first attempt
+        if self._reconnect_start_time is None:
+            self._reconnect_start_time = time.time()
+        
+        # Check if we've exceeded the timeout budget
+        elapsed = time.time() - self._reconnect_start_time
+        if elapsed >= self._max_reconnect_duration:
+            self._reconnect_start_time = None
+            raise ConnectionTimeoutException(
+                f"{self.name}: Reconnection timeout after {elapsed:.1f}s "
+                f"(limit: {self._max_reconnect_duration}s)"
+            )
+        
         delay = self._backoff.get_delay()
-        self.logger.info("%s: Reconnecting in %.2fs...", self.name, delay)
+        self.logger.info("%s: Reconnecting in %.2fs... (elapsed: %.1fs)", 
+                        self.name, delay, elapsed)
         time.sleep(delay)
         self.connect()
     
@@ -275,6 +303,16 @@ class StateReaderSocket(RobustSocket):
         super().__init__(host, port, config, name="StateReader")
         self._consecutive_timeouts = 0
         self._recv_lock = Lock()
+        self._send_lock = Lock()
+        self._pending_commands = deque()  # Queue of commands to retry after reconnect
+        self._command_retry_enabled = config.command_retry
+    
+    def connect(self):
+        """Establish connection and retry pending commands."""
+        super().connect()
+        # After successful connect, retry any pending commands
+        if self.is_connected():
+            self._retry_pending_commands()
     
     def recv_data(self, size: int) -> Optional[bytes]:
         """
@@ -367,6 +405,128 @@ class StateReaderSocket(RobustSocket):
                 return None
             else:
                 raise
+    
+    def send_command(self, command) -> bool:
+        """
+        Send command to robot with automatic retry on reconnect.
+        
+        Args:
+            command: URScript command string (str or bytes)
+            
+        Returns:
+            True if sent successfully, False if queued for retry
+        """
+        # Ensure command ends with newline
+        if not isinstance(command, bytes):
+            command = command.encode()
+        if not command.endswith(b'\n'):
+            command = command + b'\n'
+        
+        # Check for sleep/resume
+        if self.detect_sleep_resume():
+            self.logger.info("%s: Sleep detected, reconnecting", self.name)
+            try:
+                self._reconnect()
+            except Exception as ex:
+                self.logger.error("%s: Reconnect after sleep failed: %s", self.name, ex)
+                if self._command_retry_enabled:
+                    self._pending_commands.append(command)
+                return False
+        
+        # Ensure connected
+        if not self.is_connected():
+            self.logger.warning("%s: Not connected for send, attempting connection", self.name)
+            try:
+                self.connect()
+            except Exception as ex:
+                self.logger.error("%s: Connect failed: %s", self.name, ex)
+                if self._command_retry_enabled:
+                    self._pending_commands.append(command)
+                return False
+        
+        try:
+            with self._send_lock:
+                if self._socket is None:
+                    self.logger.warning("%s: Socket is None during send", self.name)
+                    if self._command_retry_enabled:
+                        self._pending_commands.append(command)
+                    return False
+                
+                # Send all data (handle partial sends)
+                total_sent = 0
+                while total_sent < len(command):
+                    sent = self._socket.send(command[total_sent:])
+                    if sent == 0:
+                        raise RuntimeError("Socket connection broken")
+                    total_sent += sent
+                
+                self.logger.debug("%s: Sent %d bytes", self.name, total_sent)
+                return True
+                
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError) as ex:
+            self.logger.warning("%s: Connection error during send: %s", self.name, ex)
+            self._stats.record_disconnect("send_connection_reset")
+            self._connected = False
+            
+            if self._command_retry_enabled:
+                self._pending_commands.append(command)
+                self.logger.info("%s: Command queued for retry after reconnect", self.name)
+            return False
+            
+        except OSError as ex:
+            if ex.errno in (errno.ECONNRESET, errno.ECONNABORTED, errno.EPIPE):
+                self.logger.warning("%s: OS error during send: %s", self.name, ex)
+                self._stats.record_disconnect(f"send_os_error_{ex.errno}")
+                self._connected = False
+                
+                if self._command_retry_enabled:
+                    self._pending_commands.append(command)
+                    self.logger.info("%s: Command queued for retry after reconnect", self.name)
+                return False
+            else:
+                raise
+        
+        except Exception as ex:
+            self.logger.error("%s: Unexpected error during send: %s", self.name, ex)
+            if self._command_retry_enabled:
+                self._pending_commands.append(command)
+            return False
+    
+    def _retry_pending_commands(self):
+        """Retry all pending commands after reconnection."""
+        if not self._command_retry_enabled or not self._pending_commands:
+            return
+        
+        self.logger.info("%s: Retrying %d pending commands", self.name, len(self._pending_commands))
+        
+        # Try to send all pending commands
+        failed_commands = deque()
+        while self._pending_commands:
+            command = self._pending_commands.popleft()
+            try:
+                with self._send_lock:
+                    if self._socket is None:
+                        failed_commands.append(command)
+                        continue
+                    
+                    total_sent = 0
+                    while total_sent < len(command):
+                        sent = self._socket.send(command[total_sent:])
+                        if sent == 0:
+                            raise RuntimeError("Socket connection broken")
+                        total_sent += sent
+                    
+                    self.logger.debug("%s: Retried command successfully (%d bytes)", 
+                                    self.name, total_sent)
+            except Exception as ex:
+                self.logger.warning("%s: Failed to retry command: %s", self.name, ex)
+                failed_commands.append(command)
+        
+        # Re-queue any commands that still failed
+        self._pending_commands = failed_commands
+        if failed_commands:
+            self.logger.warning("%s: %d commands still pending after retry", 
+                              self.name, len(failed_commands))
 
 
 class CommandSocket(RobustSocket):

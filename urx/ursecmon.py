@@ -18,7 +18,8 @@ import time
 # import traceback
 
 from urx.connection_utils import (
-    SocketConfig, StateReaderSocket, CommandSocket, IKQuerySocket
+    SocketConfig, StateReaderSocket, CommandSocket, IKQuerySocket,
+    ConnectionTimeoutException
 )
 
 __author__ = "Olivier Roulet-Dubonnet"
@@ -588,6 +589,8 @@ class SecondaryMonitor(Thread):
         self._dataEvent = Condition()
         self.lastpacket_timestamp = 0
         self._last_health_log = time.time()
+        self._fatal_error = None  # Store fatal errors from run() thread
+        self._fatal_error_lock = Lock()
 
         self.start()
         try:
@@ -596,11 +599,30 @@ class SecondaryMonitor(Thread):
             self.close()
             raise ex
 
-    def send_program(self, prog):
+    def _check_for_errors(self):
+        """Check if thread has encountered a fatal error and raise it."""
+        with self._fatal_error_lock:
+            if self._fatal_error is not None:
+                error = self._fatal_error
+                self._fatal_error = None  # Clear after raising
+                raise error
+    
+    def send_program(self, prog, timeout=30.0):
         """
         send program to robot in URRobot format
         If another program is send while a program is running the first program is aborded.
+        
+        Args:
+            prog: URScript program string
+            timeout: Maximum time to wait for program send (default 30s)
+            
+        Raises:
+            TimeoutException: If program is not sent within timeout
+            ConnectionTimeoutException: If connection failed during send
         """
+        # Check for fatal errors first
+        self._check_for_errors()
+        
         prog = prog.strip()
         self.logger.debug("Enqueueing program: %s", prog)
         if not isinstance(prog, bytes):
@@ -612,8 +634,15 @@ class SecondaryMonitor(Thread):
             with self._prog_queue_lock:
                 self._prog_queue.append(data)
             # Wait until run() loop sends it and notifies us
-            data.condition.wait()
+            if not data.condition.wait(timeout=timeout):
+                raise TimeoutException(
+                    f"Command send timeout after {timeout}s. "
+                    "Check connection or increase timeout."
+                )
             self.logger.debug("Program sent: %s", data)
+        
+        # Check if error occurred during send
+        self._check_for_errors()
 
     def run(self):
         """
@@ -622,20 +651,37 @@ class SecondaryMonitor(Thread):
         Only the last connected client is the primary client,
         so this is not guaranted and we cannot rely on information to the primary client.
         """
+        try:
+            self._run_loop()
+        except ConnectionTimeoutException as ex:
+            # Store fatal connection timeout error
+            with self._fatal_error_lock:
+                self._fatal_error = ex
+            self.logger.error("Fatal connection timeout in run thread: %s", ex)
+            # Wake up any waiters
+            with self._dataEvent:
+                self._dataEvent.notifyAll()
+        except Exception as ex:
+            # Store any other fatal error
+            with self._fatal_error_lock:
+                self._fatal_error = ex
+            self.logger.error("Fatal error in run thread: %s", ex, exc_info=True)
+            # Wake up any waiters
+            with self._dataEvent:
+                self._dataEvent.notifyAll()
+    
+    def _run_loop(self):
+        """Main loop for processing commands and reading data."""
         while not self._trystop:
             # Process program queue first
             with self._prog_queue_lock:
                 if len(self._prog_queue) > 0:
                     data = self._prog_queue.pop(0)
-                    # Send via the single robust socket (ensures "primary client" status)
-                    try:
-                        if self._robust_socket._socket and self._robust_socket.is_connected():
-                            # Send directly to maintain single-socket behavior
-                            self._robust_socket._socket.send(data.program)
-                        else:
-                            self.logger.error("Socket not connected when trying to send program")
-                    except Exception as ex:
-                        self.logger.error("Failed to send queued program: %s", ex)
+                    # Send via robust socket with proper locking and retry
+                    success = self._robust_socket.send_command(data.program)
+                    if not success:
+                        # Command queued for retry after reconnect
+                        self.logger.warning("Command queued for retry after reconnect")
                     # Notify sender that send was attempted
                     with data.condition:
                         data.condition.notify_all()
@@ -648,7 +694,8 @@ class SecondaryMonitor(Thread):
             # Read state data from the same socket
             data = self._get_data()
             if not data:
-                # No data received, continue to next iteration
+                # No data received, sleep briefly to prevent CPU spin
+                time.sleep(0.01)
                 continue
                 
             try:
@@ -715,7 +762,14 @@ class SecondaryMonitor(Thread):
     def wait(self, timeout=60):
         """
         wait for next data packet from robot
+        
+        Raises:
+            TimeoutException: If no data received within timeout
+            ConnectionTimeoutException: If connection failed
         """
+        # Check for fatal errors first
+        self._check_for_errors()
+        
         tstamp = self.lastpacket_timestamp
         with self._dataEvent:
             self._dataEvent.wait(timeout)
@@ -725,6 +779,9 @@ class SecondaryMonitor(Thread):
                         timeout
                     )
                 )
+        
+        # Check if error occurred while waiting
+        self._check_for_errors()
 
     def get_cartesian_info(self, wait=False):
         if wait:
