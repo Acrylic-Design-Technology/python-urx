@@ -886,12 +886,92 @@ class SecondaryMonitor(Thread):
         
         if stats['disconnect_reasons']:
             self.logger.debug("Disconnect reasons: %s", stats['disconnect_reasons'])
+    
+    def _retry_ik_operation(self, operation_func, operation_name, max_retries=3, 
+                            initial_delay=0.5, backoff_multiplier=2.0):
+        """
+        Retry IK operations with exponential backoff.
+        
+        Args:
+            operation_func: Function to execute (should return result or raise)
+            operation_name: Name for logging
+            max_retries: Number of retries after initial attempt (default 3)
+            initial_delay: Initial delay between retries (default 0.5s)
+            backoff_multiplier: Backoff multiplier (default 2.0)
+            
+        Returns:
+            Result from operation_func
+            
+        Raises:
+            Exception: The last exception after all retries exhausted
+        """
+        delay = initial_delay
+        last_exception = None
+        
+        for attempt in range(max_retries + 1):  # +1 for initial attempt
+            try:
+                if attempt > 0:
+                    self.logger.info(
+                        "%s: Retry attempt %d/%d after %.1fs delay",
+                        operation_name, attempt, max_retries, delay
+                    )
+                    time.sleep(delay)
+                    delay *= backoff_multiplier
+                
+                return operation_func()
+                
+            except socket.timeout as ex:
+                last_exception = ex
+                self.logger.warning(
+                    "%s: Timeout on attempt %d/%d",
+                    operation_name, attempt + 1, max_retries + 1
+                )
+                if attempt == max_retries:
+                    # Last attempt failed, raise the exception
+                    break
+            except Exception as ex:
+                # Non-timeout exceptions are not retried
+                self.logger.error("%s: Non-timeout error: %s", operation_name, ex)
+                raise
+        
+        # All retries exhausted
+        self.logger.error(
+            "%s: All %d attempts failed",
+            operation_name, max_retries + 1
+        )
+        raise last_exception
 
     def get_inverse_kin(self, pose, qnear=None, maxPositionError=1e-10, 
                         maxOrientationError=1e-10, tcp='active_tcp'):
         """
-        Calculate inverse kinematics for a given pose.
+        Calculate inverse kinematics for a given pose with automatic retry on timeout.
         Returns joint positions that achieve the specified tool pose.
+        
+        Retries up to 3 times with exponential backoff (0.5s, 1s, 2s) on timeout.
+        
+        Parameters:
+            pose: tool pose as list [x, y, z, rx, ry, rz]
+            qnear: list of joint positions for preferred solution (optional)
+            maxPositionError: maximum allowed position error (default 1e-10)
+            maxOrientationError: maximum allowed orientation error (default 1e-10)
+            tcp: tcp offset pose or 'active_tcp' string (default 'active_tcp')
+        
+        Returns:
+            list of 6 joint positions [j0, j1, j2, j3, j4, j5]
+        
+        Raises:
+            Exception if no IK solution found or timeout after all retries
+        """
+        return self._retry_ik_operation(
+            lambda: self._compute_inverse_kin(pose, qnear, maxPositionError, 
+                                             maxOrientationError, tcp),
+            "get_inverse_kin"
+        )
+    
+    def _compute_inverse_kin(self, pose, qnear=None, maxPositionError=1e-10,
+                            maxOrientationError=1e-10, tcp='active_tcp'):
+        """
+        Core inverse kinematics computation logic.
         
         Parameters:
             pose: tool pose as list [x, y, z, rx, ry, rz]
@@ -1032,8 +1112,34 @@ class SecondaryMonitor(Thread):
     def get_inverse_kin_has_solution(self, pose, qnear=None, maxPositionError=1e-10,
                                        maxOrientationError=1e-10, tcp='active_tcp'):
         """
-        Check if get_inverse_kin has a solution for a given pose.
+        Check if get_inverse_kin has a solution for a given pose with automatic retry on timeout.
         Returns boolean (True) or (False).
+        
+        Retries up to 3 times with exponential backoff (0.5s, 1s, 2s) on timeout.
+        
+        Parameters:
+            pose: tool pose as list [x, y, z, rx, ry, rz]
+            qnear: list of joint positions for preferred solution (optional)
+            maxPositionError: maximum allowed position error (default 1e-10)
+            maxOrientationError: maximum allowed orientation error (default 1e-10)
+            tcp: tcp offset pose or 'active_tcp' string (default 'active_tcp')
+        
+        Returns:
+            bool: True if IK solution exists, False otherwise
+        
+        Raises:
+            Exception if timeout or communication error after all retries
+        """
+        return self._retry_ik_operation(
+            lambda: self._compute_inverse_kin_has_solution(pose, qnear, maxPositionError,
+                                                           maxOrientationError, tcp),
+            "get_inverse_kin_has_solution"
+        )
+    
+    def _compute_inverse_kin_has_solution(self, pose, qnear=None, maxPositionError=1e-10,
+                                          maxOrientationError=1e-10, tcp='active_tcp'):
+        """
+        Core inverse kinematics solution check logic.
         
         Parameters:
             pose: tool pose as list [x, y, z, rx, ry, rz]
