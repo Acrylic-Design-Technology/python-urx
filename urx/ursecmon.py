@@ -632,6 +632,54 @@ class SecondaryMonitor(Thread):
             with self._dataEvent:
                 self._dataEvent.notifyAll()
 
+    def _attempt_reconnect(self):
+        """
+        Attempt to reconnect with exponential backoff
+        """
+        attempt = 0
+        max_attempts = 10
+        
+        while attempt < max_attempts and not self._trystop:
+            attempt += 1
+            try:
+                # Close old socket
+                try:
+                    self._s_secondary.close()
+                except:
+                    pass
+                
+                # Wait progressively longer: 0.5s, 1s, 2s, 3s, max 5s
+                wait_time = min(0.5 * attempt, 5.0)
+                self.logger.info(
+                    "Reconnect attempt %d/%d in %.1fs...", 
+                    attempt, max_attempts, wait_time
+                )
+                time.sleep(wait_time)
+                
+                # Try to reconnect
+                self._s_secondary = socket.create_connection(
+                    (self.host, self.secondary_port), timeout=2.0
+                )
+                self._s_secondary.setsockopt(
+                    socket.IPPROTO_TCP, socket.TCP_NODELAY, 1
+                )
+                
+                self.logger.info("Reconnected successfully")
+                self._dataqueue = bytes()  # Clear buffer
+                return  # Success
+                
+            except Exception as reconnect_ex:
+                self.logger.debug(
+                    "Reconnect attempt %d failed: %s", 
+                    attempt, reconnect_ex
+                )
+                if attempt >= max_attempts:
+                    self.logger.error(
+                        "Failed to reconnect after %d attempts", 
+                        max_attempts
+                    )
+                    raise
+
     def _get_data(self):
         """
         Returns a complete packet, handles reconnection on errors
@@ -664,11 +712,12 @@ class SecondaryMonitor(Thread):
                     self.logger.warning(
                         "No data received for %d timeouts (%.1fs), connection appears dead",
                         self._consecutive_timeouts,
-                        self._consecutive_timeouts * 2
+                        self._consecutive_timeouts * 0.5
                     )
                     self._consecutive_timeouts = 0
-                    # Force reconnection by raising error
-                    raise ConnectionResetError("Connection timeout - no data received")
+                    # Instead of raising, call reconnection directly
+                    self._attempt_reconnect()
+                    continue  # After reconnect, continue loop
                 
                 # Normal timeout, just retry
                 continue
@@ -678,52 +727,7 @@ class SecondaryMonitor(Thread):
                 # Connection lost - try to reconnect
                 self._consecutive_timeouts = 0
                 self.logger.warning("Connection error: %s, reconnecting...", ex)
-                
-                attempt = 0
-                max_attempts = 10
-                
-                while attempt < max_attempts and not self._trystop:
-                    attempt += 1
-                    try:
-                        # Close old socket
-                        try:
-                            self._s_secondary.close()
-                        except:
-                            pass
-                        
-                        # Wait progressively longer: 0.5s, 1s, 2s, 3s, max 5s
-                        wait_time = min(0.5 * attempt, 5.0)
-                        self.logger.info(
-                            "Reconnect attempt %d/%d in %.1fs...", 
-                            attempt, max_attempts, wait_time
-                        )
-                        time.sleep(wait_time)
-                        
-                        # Try to reconnect
-                        self._s_secondary = socket.create_connection(
-                            (self.host, self.secondary_port), timeout=2.0
-                        )
-                        self._s_secondary.setsockopt(
-                            socket.IPPROTO_TCP, socket.TCP_NODELAY, 1
-                        )
-                        
-                        self.logger.info("Reconnected successfully")
-                        self._dataqueue = bytes()  # Clear buffer
-                        break
-                        
-                    except Exception as reconnect_ex:
-                        self.logger.debug(
-                            "Reconnect attempt %d failed: %s", 
-                            attempt, reconnect_ex
-                        )
-                        if attempt >= max_attempts:
-                            self.logger.error(
-                                "Failed to reconnect after %d attempts", 
-                                max_attempts
-                            )
-                            raise
-                
-                # After reconnect, continue to read data
+                self._attempt_reconnect()
                 continue
 
     def wait(self, timeout=60):
