@@ -15,12 +15,6 @@ import struct
 import socket
 from copy import copy
 import time
-# import traceback
-
-from urx.connection_utils import (
-    SocketConfig, StateReaderSocket, CommandSocket, IKQuerySocket,
-    ConnectionTimeoutException
-)
 
 __author__ = "Olivier Roulet-Dubonnet"
 __copyright__ = "Copyright 2011-2013, Sintef Raufoss Manufacturing"
@@ -51,7 +45,6 @@ class TimeoutException(Exception):
 
 class ParserUtils(object):
     def __init__(self):
-        # self.logger = logging.getLogger("ursecmon")
         self.logger = logging.getLogger('URX Logger')
         self.version = (0, 0)
 
@@ -60,19 +53,14 @@ class ParserUtils(object):
         parse a packet from the UR socket and return a dictionary with the data
         """
         allData = {}
-        # print "Total size ", len(data)
         while data:
             psize, ptype, pdata, data = self.analyze_header(data)
-            # print "We got packet with size %i and type %s" % (psize, ptype)
             if ptype == 16:
                 allData["SecondaryClientData"] = self._get_data(
                     pdata, "!iB", ("size", "type")
                 )
-                data = (pdata + data)[
-                    5:
-                ]  # This is the total size so we resend data to parser
+                data = (pdata + data)[5:]
             elif ptype == 0:
-                # this parses RobotModeData for versions >=3.0 (i.e. 3.0)
                 if psize == 38:
                     self.version = (3, 0)
                     allData["RobotModeData"] = self._get_data(
@@ -95,7 +83,7 @@ class ParserUtils(object):
                             "speedScaling",
                         ),
                     )
-                elif psize == 46:  # It's 46 bytes in 3.2
+                elif psize == 46:
                     self.version = (3, 2)
                     allData["RobotModeData"] = self._get_data(
                         pdata,
@@ -215,9 +203,9 @@ class ParserUtils(object):
                 )
             elif ptype == 3:
                 if self.version >= (3, 0):
-                    fmt = "iBiibbddbbddffffBBb"  # firmware >= 3.0
+                    fmt = "iBiibbddbbddffffBBb"
                 else:
-                    fmt = "iBhhbbddbbddffffBBb"  # firmware < 3.0
+                    fmt = "iBhhbbddbbddffffBBb"
 
                 allData["MasterBoardData"] = self._get_data(
                     pdata,
@@ -240,7 +228,7 @@ class ParserUtils(object):
                         "robotCurrent",
                         "masterIOCurrent",
                     ),
-                )  # , "masterSafetyState" ,"masterOnOffState", "euromap67InterfaceInstalled"   ))
+                )
             elif ptype == 2:
                 allData["ToolData"] = self._get_data(
                     pdata,
@@ -260,7 +248,7 @@ class ParserUtils(object):
                     ),
                 )
             elif ptype == 9:
-                continue  # This package has a length of 53 bytes. It is used internally by Universal Robots software only and should be skipped.
+                continue
             elif ptype == 8 and self.version >= (3, 2):
                 allData["AdditionalInfo"] = self._get_data(
                     pdata,
@@ -273,11 +261,6 @@ class ParserUtils(object):
                     "iBddddddd",
                     ("size", "type", "x", "y", "z", "rx", "ry", "rz", "robotDexterity"),
                 )
-            # elif ptype == 8:
-            #     allData["varMessage"] = self._get_data(pdata, "!iBQbb iiBAcAc", ("size", "type", "timestamp", "source", "robotMessageType", "code", "argument", "titleSize", "messageTitle", "messageText"))
-            # elif ptype == 7:
-            #     allData["keyMessage"] = self._get_data(pdata, "!iBQbb iiBAcAc", ("size", "type", "timestamp", "source", "robotMessageType", "code", "argument", "titleSize", "messageTitle", "messageText"))
-
             elif ptype == 20:
                 tmp = self._get_data(
                     pdata,
@@ -425,7 +408,7 @@ class ParserUtils(object):
             names args are strings used to store values
         """
         tmpdata = copy(data)
-        fmt = fmt.strip()  # space may confuse us
+        fmt = fmt.strip()
         d = dict()
         i = 0
         j = 0
@@ -433,13 +416,10 @@ class ParserUtils(object):
             f = fmt[j]
             if f in (" ", "!", ">", "<"):
                 j += 1
-            elif f == "A":  # we got an array
-                # first we need to find its size
-                if (
-                    j == len(fmt) - 2
-                ):  # we are last element, size is the rest of data in packet
+            elif f == "A":
+                if j == len(fmt) - 2:
                     arraysize = len(tmpdata)
-                else:  # size should be given in last element
+                else:
                     asn = names[i - 1]
                     if not asn.endswith("Size"):
                         raise ParsingException(
@@ -448,14 +428,12 @@ class ParserUtils(object):
                     else:
                         arraysize = d[asn]
                 d[names[i]] = tmpdata[0:arraysize]
-                # print "Array is ", names[i], d[names[i]]
                 tmpdata = tmpdata[arraysize:]
                 j += 2
                 i += 1
             else:
                 fmtsize = struct.calcsize(fmt[j])
-                # print "reading ", f , i, j,  fmtsize, len(tmpdata)
-                if len(tmpdata) < fmtsize:  # seems to happen on windows
+                if len(tmpdata) < fmtsize:
                     raise ParsingException(
                         "Error, length of data smaller than advertized: ",
                         len(tmpdata),
@@ -467,7 +445,6 @@ class ParserUtils(object):
                         j,
                     )
                 d[names[i]] = struct.unpack("!" + f, tmpdata[0:fmtsize])[0]
-                # print names[i], d[names[i]]
                 tmpdata = tmpdata[fmtsize:]
                 j += 1
                 i += 1
@@ -506,9 +483,6 @@ class ParserUtils(object):
         counter = 0
         limit = 10
         while True:
-            # self.logger.debug(
-            #             "Len data: %s", len(data)
-            #         )
             if len(data) >= 5:
                 psize, ptype = self.get_header(data)
                 if psize < 5 or psize > 2000 or ptype != 16:
@@ -531,10 +505,8 @@ class ParserUtils(object):
                         self.logger.info(
                             "Remove %s bytes of garbage at begining of packet", counter
                         )
-                    # ok we we have somehting which looks like a packet"
                     return (data[:psize], data[psize:])
                 else:
-                    # packet is not complete
                     self.logger.debug(
                         "Packet is not complete, advertised size is %s, received size is %s, type is %s",
                         psize,
@@ -543,7 +515,6 @@ class ParserUtils(object):
                     )
                     return None
             else:
-                # self.logger.debug("data smaller than 5 bytes")
                 return None
 
 
@@ -559,90 +530,45 @@ class SecondaryMonitor(Thread):
         self._dict = {}
         self._dictLock = Lock()
         self.host = host
-        self.secondary_port = 30002  # Secondary client interface on Universal Robots
+        self.secondary_port = 30002
         
-        # Initialize robust socket connections
-        self._socket_config = SocketConfig(
-            connect_timeout=1.0,
-            recv_timeout=0.3,
-            send_timeout=1.0,
-            tcp_nodelay=True,
-            so_keepalive=True,
-            missed_cycle_threshold=3
+        # Simple socket creation
+        self._s_secondary = socket.create_connection(
+            (self.host, self.secondary_port), timeout=2.0
         )
-        
-        # Use a single robust socket for both reading and writing (UR robots expect ONE client)
-        self._robust_socket = StateReaderSocket(self.host, self.secondary_port, self._socket_config)
-        
-        # Connect socket
-        try:
-            self._robust_socket.connect()
-        except Exception as ex:
-            self.logger.error("Failed to initialize secondary socket: %s", ex)
-            raise
+        self._s_secondary.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         
         self._prog_queue = []
         self._prog_queue_lock = Lock()
         self._dataqueue = bytes()
-        self._trystop = False  # to stop thread
-        self.running = False  # True when robot is on and listening
+        self._trystop = False
+        self.running = False
         self._dataEvent = Condition()
         self.lastpacket_timestamp = 0
-        self._last_health_log = time.time()
-        self._fatal_error = None  # Store fatal errors from run() thread
-        self._fatal_error_lock = Lock()
 
         self.start()
         try:
-            self.wait()  # make sure we got some data before someone calls us
+            self.wait()
         except TimeoutException as ex:
             self.close()
             raise ex
 
-    def _check_for_errors(self):
-        """Check if thread has encountered a fatal error and raise it."""
-        with self._fatal_error_lock:
-            if self._fatal_error is not None:
-                error = self._fatal_error
-                self._fatal_error = None  # Clear after raising
-                raise error
-    
-    def send_program(self, prog, timeout=30.0):
+    def send_program(self, prog):
         """
         send program to robot in URRobot format
         If another program is send while a program is running the first program is aborded.
-        
-        Args:
-            prog: URScript program string
-            timeout: Maximum time to wait for program send (default 30s)
-            
-        Raises:
-            TimeoutException: If program is not sent within timeout
-            ConnectionTimeoutException: If connection failed during send
         """
-        # Check for fatal errors first
-        self._check_for_errors()
-        
         prog = prog.strip()
         self.logger.debug("Enqueueing program: %s", prog)
         if not isinstance(prog, bytes):
             prog = prog.encode()
-        
-        # Create Program wrapper with condition for synchronization
+
         data = Program(prog + b"\n")
         with data.condition:
             with self._prog_queue_lock:
                 self._prog_queue.append(data)
-            # Wait until run() loop sends it and notifies us
-            if not data.condition.wait(timeout=timeout):
-                raise TimeoutException(
-                    f"Command send timeout after {timeout}s. "
-                    "Check connection or increase timeout."
-                )
-            self.logger.debug("Program sent: %s", data)
-        
-        # Check if error occurred during send
-        self._check_for_errors()
+            data.condition.wait()
+            self.logger.debug("program sent: %s", data)
 
     def run(self):
         """
@@ -651,51 +577,22 @@ class SecondaryMonitor(Thread):
         Only the last connected client is the primary client,
         so this is not guaranted and we cannot rely on information to the primary client.
         """
-        try:
-            self._run_loop()
-        except ConnectionTimeoutException as ex:
-            # Store fatal connection timeout error
-            with self._fatal_error_lock:
-                self._fatal_error = ex
-            self.logger.error("Fatal connection timeout in run thread: %s", ex)
-            # Wake up any waiters
-            with self._dataEvent:
-                self._dataEvent.notifyAll()
-        except Exception as ex:
-            # Store any other fatal error
-            with self._fatal_error_lock:
-                self._fatal_error = ex
-            self.logger.error("Fatal error in run thread: %s", ex, exc_info=True)
-            # Wake up any waiters
-            with self._dataEvent:
-                self._dataEvent.notifyAll()
-    
-    def _run_loop(self):
-        """Main loop for processing commands and reading data."""
         while not self._trystop:
-            # Process program queue first
+            # Send queued programs
             with self._prog_queue_lock:
                 if len(self._prog_queue) > 0:
                     data = self._prog_queue.pop(0)
-                    # Send via robust socket with proper locking and retry
-                    success = self._robust_socket.send_command(data.program)
-                    if not success:
-                        # Command queued for retry after reconnect
-                        self.logger.warning("Command queued for retry after reconnect")
-                    # Notify sender that send was attempted
+                    try:
+                        self._s_secondary.send(data.program)
+                    except (ConnectionResetError, BrokenPipeError, OSError) as ex:
+                        # Connection lost during send, will reconnect in _get_data
+                        self.logger.warning("Error sending program: %s", ex)
                     with data.condition:
                         data.condition.notify_all()
-            
-            # Periodic health logging (every 10 minutes)
-            if time.time() - self._last_health_log > 600:
-                self._log_health_summary()
-                self._last_health_log = time.time()
-            
-            # Read state data from the same socket
+
+            # Read and parse data
             data = self._get_data()
             if not data:
-                # No data received, sleep briefly to prevent CPU spin
-                time.sleep(0.01)
                 continue
                 
             try:
@@ -714,18 +611,15 @@ class SecondaryMonitor(Thread):
 
             self.lastpacket_timestamp = time.time()
 
-            rmode = 0
-            if self._parser.version >= (3, 0):
-                rmode = 7
-
-            if (
-                self._dict["RobotModeData"]["robotMode"] == rmode
-                and self._dict["RobotModeData"]["isRealRobotEnabled"] is True
-                and self._dict["RobotModeData"]["isEmergencyStopped"] is False
-                and self._dict["RobotModeData"]["isSecurityStopped"] is False
-                and self._dict["RobotModeData"]["isRobotConnected"] is True
-                and self._dict["RobotModeData"]["isPowerOnRobot"] is True
-            ):
+            # Check robot running state
+            rmode = 7 if self._parser.version >= (3, 0) else 0
+            
+            if (self._dict["RobotModeData"]["robotMode"] == rmode and
+                self._dict["RobotModeData"]["isRealRobotEnabled"] is True and
+                self._dict["RobotModeData"]["isEmergencyStopped"] is False and
+                self._dict["RobotModeData"]["isSecurityStopped"] is False and
+                self._dict["RobotModeData"]["isRobotConnected"] is True and
+                self._dict["RobotModeData"]["isPowerOnRobot"] is True):
                 self.running = True
             else:
                 if self.running:
@@ -733,43 +627,91 @@ class SecondaryMonitor(Thread):
                         "Robot not running: " + str(self._dict["RobotModeData"])
                     )
                 self.running = False
+                
             with self._dataEvent:
-                # print("X: new data")
                 self._dataEvent.notifyAll()
 
     def _get_data(self):
         """
-        returns something that looks like a packet, nothing is guaranted
-        Returns None if no packet available
+        Returns a complete packet, handles reconnection on errors
         """
         while not self._trystop:
-            # self.logger.debug("data queue size is: {}".format(len(self._dataqueue)))
             ans = self._parser.find_first_packet(self._dataqueue[:])
-
+            
             if ans:
                 self._dataqueue = ans[1]
-                self.logger.debug("found packet of size {}".format(len(ans[0])))
+                self.logger.debug("Found packet of size {}".format(len(ans[0])))
                 return ans[0]
-            else:
-                # self.logger.debug("Could not find packet in received data")
-                tmp = self._robust_socket.recv_data(1024)
-                if tmp is None:
-                    # Timeout or error, socket will auto-reconnect if needed
-                    # Return None to allow loop to continue
-                    return None
+            
+            # Need more data
+            try:
+                self._s_secondary.settimeout(0.5)  # Short timeout for recv
+                tmp = self._s_secondary.recv(1024)
+                if not tmp:
+                    # Socket closed by peer
+                    raise ConnectionResetError("Peer closed connection")
                 self._dataqueue += tmp
+                
+            except socket.timeout:
+                # Normal timeout, just retry
+                continue
+                
+            except (ConnectionResetError, ConnectionAbortedError, 
+                    ConnectionRefusedError, BrokenPipeError, OSError) as ex:
+                # Connection lost - try to reconnect
+                self.logger.warning("Connection error: %s, reconnecting...", ex)
+                
+                attempt = 0
+                max_attempts = 10
+                
+                while attempt < max_attempts and not self._trystop:
+                    attempt += 1
+                    try:
+                        # Close old socket
+                        try:
+                            self._s_secondary.close()
+                        except:
+                            pass
+                        
+                        # Wait progressively longer: 0.5s, 1s, 2s, 3s, max 5s
+                        wait_time = min(0.5 * attempt, 5.0)
+                        self.logger.info(
+                            "Reconnect attempt %d/%d in %.1fs...", 
+                            attempt, max_attempts, wait_time
+                        )
+                        time.sleep(wait_time)
+                        
+                        # Try to reconnect
+                        self._s_secondary = socket.create_connection(
+                            (self.host, self.secondary_port), timeout=2.0
+                        )
+                        self._s_secondary.setsockopt(
+                            socket.IPPROTO_TCP, socket.TCP_NODELAY, 1
+                        )
+                        
+                        self.logger.info("Reconnected successfully")
+                        self._dataqueue = bytes()  # Clear buffer
+                        break
+                        
+                    except Exception as reconnect_ex:
+                        self.logger.debug(
+                            "Reconnect attempt %d failed: %s", 
+                            attempt, reconnect_ex
+                        )
+                        if attempt >= max_attempts:
+                            self.logger.error(
+                                "Failed to reconnect after %d attempts", 
+                                max_attempts
+                            )
+                            raise
+                
+                # After reconnect, continue to read data
+                continue
 
     def wait(self, timeout=60):
         """
         wait for next data packet from robot
-        
-        Raises:
-            TimeoutException: If no data received within timeout
-            ConnectionTimeoutException: If connection failed
         """
-        # Check for fatal errors first
-        self._check_for_errors()
-        
         tstamp = self.lastpacket_timestamp
         with self._dataEvent:
             self._dataEvent.wait(timeout)
@@ -779,9 +721,6 @@ class SecondaryMonitor(Thread):
                         timeout
                     )
                 )
-        
-        # Check if error occurred while waiting
-        self._check_for_errors()
 
     def get_cartesian_info(self, wait=False):
         if wait:
@@ -869,54 +808,22 @@ class SecondaryMonitor(Thread):
         with self._dictLock:
             return self._dict["RobotModeData"]["isProgramRunning"]
     
-    def _log_health_summary(self):
-        """Log connection health metrics."""
-        stats = self._robust_socket.get_stats()
-        
-        self.logger.info(
-            "Secondary connection health: "
-            "connects=%d, disconnects=%d, timeouts=%d, missed_cycles=%d, "
-            "avg_recv_ms=%.2f",
-            stats['total_connects'],
-            stats['total_disconnects'],
-            stats['timeout_count'],
-            stats['missed_cycles'],
-            stats['avg_recv_duration_ms']
-        )
-        
-        if stats['disconnect_reasons']:
-            self.logger.debug("Disconnect reasons: %s", stats['disconnect_reasons'])
-    
-    def _retry_ik_operation(self, operation_func, operation_name, max_retries=3, 
-                            initial_delay=0.5, backoff_multiplier=2.0):
+    def _retry_ik_operation(self, operation_func, operation_name, 
+                            max_retries=5, initial_delay=0.5):
         """
-        Retry IK operations with exponential backoff.
-        
-        Args:
-            operation_func: Function to execute (should return result or raise)
-            operation_name: Name for logging
-            max_retries: Number of retries after initial attempt (default 3)
-            initial_delay: Initial delay between retries (default 0.5s)
-            backoff_multiplier: Backoff multiplier (default 2.0)
-            
-        Returns:
-            Result from operation_func
-            
-        Raises:
-            Exception: The last exception after all retries exhausted
+        Retry IK operations with simple backoff
         """
-        delay = initial_delay
         last_exception = None
         
-        for attempt in range(max_retries + 1):  # +1 for initial attempt
+        for attempt in range(max_retries + 1):
             try:
                 if attempt > 0:
+                    delay = initial_delay * attempt  # Linear: 0.5s, 1s, 1.5s, 2s, 2.5s
                     self.logger.info(
-                        "%s: Retry attempt %d/%d after %.1fs delay",
+                        "%s: Retry %d/%d after %.1fs", 
                         operation_name, attempt, max_retries, delay
                     )
                     time.sleep(delay)
-                    delay *= backoff_multiplier
                 
                 return operation_func()
                 
@@ -927,7 +834,6 @@ class SecondaryMonitor(Thread):
                     operation_name, attempt + 1, max_retries + 1
                 )
                 if attempt == max_retries:
-                    # Last attempt failed, raise the exception
                     break
             except Exception as ex:
                 # Non-timeout exceptions are not retried
@@ -947,7 +853,7 @@ class SecondaryMonitor(Thread):
         Calculate inverse kinematics for a given pose with automatic retry on timeout.
         Returns joint positions that achieve the specified tool pose.
         
-        Retries up to 3 times with exponential backoff (0.5s, 1s, 2s) on timeout.
+        Retries up to 5 times with linear backoff on timeout.
         
         Parameters:
             pose: tool pose as list [x, y, z, rx, ry, rz]
@@ -972,51 +878,36 @@ class SecondaryMonitor(Thread):
                             maxOrientationError=1e-10, tcp='active_tcp'):
         """
         Core inverse kinematics computation logic.
-        
-        Parameters:
-            pose: tool pose as list [x, y, z, rx, ry, rz]
-            qnear: list of joint positions for preferred solution (optional)
-            maxPositionError: maximum allowed position error (default 1e-10)
-            maxOrientationError: maximum allowed orientation error (default 1e-10)
-            tcp: tcp offset pose or 'active_tcp' string (default 'active_tcp')
-        
-        Returns:
-            list of 6 joint positions [j0, j1, j2, j3, j4, j5]
-        
-        Raises:
-            Exception if no IK solution found or timeout
         """
-        # Create a dedicated IK query socket
-        ik_socket = IKQuerySocket(self.host, self.secondary_port, self._socket_config)
-        
-        # Create a temporary server socket to receive the result
+        # Create temporary server to receive result
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind(('', 0))  # Bind to any available port
+        server_socket.bind(('', 0))
         server_socket.listen(1)
-        server_socket.settimeout(5.0)  # 5 second timeout
+        server_socket.settimeout(10.0)  # Increased from 5.0 for WSL
         
-        # Get the assigned port
         port = server_socket.getsockname()[1]
         
-        # Get local IP address that the robot can reach
-        # Create a temporary connection to determine our local IP
+        # Get local IP
         try:
             temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             temp_sock.connect((self.host, self.secondary_port))
             local_ip = temp_sock.getsockname()[0]
             temp_sock.close()
+            
+            # Warn if WSL detected
+            if local_ip.startswith('172.'):
+                self.logger.warning(
+                    "Detected internal IP %s - if IK fails, check WSL networking", 
+                    local_ip
+                )
         except Exception:
-            # Fallback to using host as the IP
             local_ip = self.host
         
         self.logger.debug("Listening for IK result on %s:%s", local_ip, port)
         
         client_socket = None
         try:
-            # Connect the IK socket
-            ik_socket.connect()
-            
             # Format pose as URScript pose
             pose_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*pose)
             
@@ -1060,11 +951,10 @@ class SecondaryMonitor(Thread):
             prog_lines.append("get_ik_program()")
             
             prog = "\n".join(prog_lines)
-            self.logger.debug("Sending IK program via dedicated socket: %s", prog)
+            self.logger.debug("Sending IK program: %s", prog)
             
-            # Send the program via dedicated IK socket
-            if not ik_socket.send_query(prog):
-                raise Exception("Failed to send IK query to robot")
+            # Send the program
+            self.send_program(prog)
             
             # Wait for connection from robot
             self.logger.debug("Waiting for robot to connect...")
@@ -1073,7 +963,7 @@ class SecondaryMonitor(Thread):
             
             # Receive the joint values
             joint_values = []
-            client_socket.settimeout(2.0)
+            client_socket.settimeout(5.0)  # Increased from 2.0 for WSL
             data = b""
             
             for i in range(6):
@@ -1095,7 +985,7 @@ class SecondaryMonitor(Thread):
             return joint_values
             
         except socket.timeout:
-            self.logger.error("Timeout waiting for IK result")
+            self.logger.error("Timeout waiting for IK result (WSL?)")
             raise Exception("Timeout waiting for inverse kinematics result")
         except Exception as ex:
             self.logger.error("Error getting inverse kinematics: %s", ex)
@@ -1107,7 +997,6 @@ class SecondaryMonitor(Thread):
                 except:
                     pass
             server_socket.close()
-            ik_socket.close()
 
     def get_inverse_kin_has_solution(self, pose, qnear=None, maxPositionError=1e-10,
                                        maxOrientationError=1e-10, tcp='active_tcp'):
@@ -1115,7 +1004,7 @@ class SecondaryMonitor(Thread):
         Check if get_inverse_kin has a solution for a given pose with automatic retry on timeout.
         Returns boolean (True) or (False).
         
-        Retries up to 3 times with exponential backoff (0.5s, 1s, 2s) on timeout.
+        Retries up to 5 times with linear backoff on timeout.
         
         Parameters:
             pose: tool pose as list [x, y, z, rx, ry, rz]
@@ -1140,51 +1029,36 @@ class SecondaryMonitor(Thread):
                                           maxOrientationError=1e-10, tcp='active_tcp'):
         """
         Core inverse kinematics solution check logic.
-        
-        Parameters:
-            pose: tool pose as list [x, y, z, rx, ry, rz]
-            qnear: list of joint positions for preferred solution (optional)
-            maxPositionError: maximum allowed position error (default 1e-10)
-            maxOrientationError: maximum allowed orientation error (default 1e-10)
-            tcp: tcp offset pose or 'active_tcp' string (default 'active_tcp')
-        
-        Returns:
-            bool: True if IK solution exists, False otherwise
-        
-        Raises:
-            Exception if timeout or communication error
         """
-        # Create a dedicated IK query socket
-        ik_socket = IKQuerySocket(self.host, self.secondary_port, self._socket_config)
-        
-        # Create a temporary server socket to receive the result
+        # Create temporary server to receive result
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind(('', 0))  # Bind to any available port
+        server_socket.bind(('', 0))
         server_socket.listen(1)
-        server_socket.settimeout(5.0)  # 5 second timeout
+        server_socket.settimeout(10.0)  # Increased from 5.0 for WSL
         
-        # Get the assigned port
         port = server_socket.getsockname()[1]
         
-        # Get local IP address that the robot can reach
-        # Create a temporary connection to determine our local IP
+        # Get local IP
         try:
             temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             temp_sock.connect((self.host, self.secondary_port))
             local_ip = temp_sock.getsockname()[0]
             temp_sock.close()
+            
+            # Warn if WSL detected
+            if local_ip.startswith('172.'):
+                self.logger.warning(
+                    "Detected internal IP %s - if IK fails, check WSL networking", 
+                    local_ip
+                )
         except Exception:
-            # Fallback to using host as the IP
             local_ip = self.host
         
         self.logger.debug("Listening for IK solution check on %s:%s", local_ip, port)
         
         client_socket = None
         try:
-            # Connect the IK socket
-            ik_socket.connect()
-            
             # Format pose as URScript pose
             pose_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*pose)
             
@@ -1223,11 +1097,10 @@ class SecondaryMonitor(Thread):
             prog_lines.append("check_ik_program()")
             
             prog = "\n".join(prog_lines)
-            self.logger.debug("Sending IK solution check program via dedicated socket: %s", prog)
+            self.logger.debug("Sending IK solution check program: %s", prog)
             
-            # Send the program via dedicated IK socket
-            if not ik_socket.send_query(prog):
-                raise Exception("Failed to send IK solution check query to robot")
+            # Send the program
+            self.send_program(prog)
             
             # Wait for connection from robot
             self.logger.debug("Waiting for robot to connect...")
@@ -1235,7 +1108,7 @@ class SecondaryMonitor(Thread):
             self.logger.debug("Robot connected from %s", addr)
             
             # Receive the boolean result
-            client_socket.settimeout(2.0)
+            client_socket.settimeout(5.0)  # Increased from 2.0 for WSL
             data = b""
             
             # Read until we get a newline
@@ -1257,7 +1130,7 @@ class SecondaryMonitor(Thread):
             return has_solution
             
         except socket.timeout:
-            self.logger.error("Timeout waiting for IK solution check result")
+            self.logger.error("Timeout waiting for IK solution check result (WSL?)")
             raise Exception("Timeout waiting for inverse kinematics solution check result")
         except Exception as ex:
             self.logger.error("Error checking inverse kinematics solution: %s", ex)
@@ -1269,16 +1142,13 @@ class SecondaryMonitor(Thread):
                 except:
                     pass
             server_socket.close()
-            ik_socket.close()
 
     def close(self):
         self._trystop = True
         self.join()
-        # with self._dataEvent: #wake up any thread that may be waiting for data before we close. Should we do that?
-        # self._dataEvent.notifyAll()
         
         # Close the socket
         try:
-            self._robust_socket.close()
+            self._s_secondary.close()
         except Exception as ex:
-            self.logger.debug("Error closing robust socket: %s", ex)
+            self.logger.debug("Error closing socket: %s", ex)

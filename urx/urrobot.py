@@ -6,6 +6,7 @@ http://support.universal-robots.com/URRobot/RemoteAccess
 
 import logging
 import numbers
+import time
 
 try:
     from collections.abc import Sequence
@@ -258,48 +259,96 @@ class URRobot(object):
 
     def _wait_for_move(self, target, threshold=None, timeout=60, joints=False):
         """
-        wait for a move to complete. Unfortunately there is no good way to know when a move has finished
-        so for every received data from robot we compute a dist equivalent and when it is lower than
-        'threshold' we return.
-        if threshold is not reached within timeout, an exception is raised
+        Wait for move completion with proper stop detection.
         """
         self.logger.debug(
             "Waiting for move completion using threshold %s and target %s",
-            threshold,
-            target,
+            threshold, target
         )
+        
         start_dist = self._get_dist(target, joints)
         if threshold is None:
-            threshold = (
-                start_dist * 0.8
-            )  # FRED: THIS IS SUPPOSED TO BE *0.8 BUT IT BREAKS SOME MOVEMENTS WITH ANGLES
-            if threshold < 0.001:  # roboten precision is limited
+            threshold = start_dist * 0.8
+            if threshold < 0.001:
                 threshold = 0.001
             self.logger.debug("No threshold set, setting it to %s", threshold)
-        count = 0
+        
+        start_time = time.time()
+        last_program_running = None
+        stopped_count = 0
+        
         while True:
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                raise RobotException(
+                    f"Move timeout after {elapsed:.1f}s. "
+                    f"Distance: {self._get_dist(target, joints):.4f}, "
+                    f"threshold: {threshold:.4f}"
+                )
+            
+            # Check robot state
             if not self.is_running():
-                raise RobotException("Robot stopped")
-            dist = self._get_dist(target, joints)
-            self.logger.debug(
-                "distance to target is: %s, target dist is %s", dist, threshold
-            )
-            if not self.secmon.is_program_running():
-                if dist < threshold:
-                    self.logger.debug(
-                        "we are threshold(%s) close to target, move has ended",
-                        threshold,
-                    )
-                    return
-                count += 1
-                if count > timeout * 10:
-                    raise RobotException(
-                        "Goal not reached but no program has been running for {} seconds. dist is {}, threshold is {}, target is {}, current pose is {}".format(
-                            timeout, dist, threshold, target, URRobot.getl(self)
-                        )
-                    )
+                raise RobotException("Robot stopped (powered off or disconnected)")
+            
+            # Get current state
+            try:
+                robot_data = self.secmon.get_all_data(wait=False)
+            except Exception as ex:
+                self.logger.warning("Error getting robot data: %s", ex)
+                time.sleep(0.1)
+                continue
+            
+            if not robot_data or "RobotModeData" not in robot_data:
+                time.sleep(0.1)
+                continue
+            
+            mode_data = robot_data["RobotModeData"]
+            
+            # Check for stops
+            if mode_data.get("isEmergencyStopped"):
+                raise RobotException("Robot emergency stopped")
+            if mode_data.get("isSecurityStopped"):
+                raise RobotException("Robot protective/security stopped")
+            
+            is_program_running = mode_data.get("isProgramRunning", False)
+            
+            if is_program_running:
+                # Program running - reset counter
+                stopped_count = 0
+                last_program_running = time.time()
             else:
-                count = 0
+                # Program not running
+                stopped_count += 1
+                
+                # Get distance to target
+                try:
+                    dist = self._get_dist(target, joints)
+                except Exception as ex:
+                    self.logger.warning("Error calculating distance: %s", ex)
+                    time.sleep(0.1)
+                    continue
+                
+                self.logger.debug(
+                    "Program stopped, distance: %.4f, threshold: %.4f", 
+                    dist, threshold
+                )
+                
+                if dist < threshold:
+                    # Success!
+                    self.logger.debug("Reached target")
+                    return
+                
+                # Program stopped but not at target
+                # Wait a bit to see if it's just a momentary state
+                if stopped_count > 10:  # 1 second at 10Hz
+                    current_pose = URRobot.getl(self)
+                    raise RobotException(
+                        f"Program stopped without reaching target. "
+                        f"Distance: {dist:.4f}, threshold: {threshold:.4f}, "
+                        f"target: {target}, current: {current_pose}"
+                    )
+            
+            time.sleep(0.1)  # 10Hz polling
 
     def _get_dist(self, target, joints=False):
         if joints:
@@ -955,29 +1004,6 @@ class URRobot(object):
         if self.rtmon:
             self.rtmon.stop()
     
-    def get_connection_stats(self):
-        """
-        Return dictionary of connection health metrics.
-        
-        Returns:
-            dict: Connection statistics including connects, disconnects, timeouts, etc.
-        
-        Example:
-            stats = robot.get_connection_stats()
-            print(f"Total connects: {stats['total_connects']}")
-            print(f"Timeouts: {stats['timeout_count']}")
-        """
-        return self.secmon._robust_socket.get_stats()
-    
-    def reset_connection_stats(self):
-        """
-        Reset all connection metrics counters.
-        
-        Useful for monitoring connection health over specific time periods
-        or after recovering from connection issues.
-        """
-        self.secmon._robust_socket.reset_stats()
-
     def set_freedrive(self, val, timeout=60):
         """
         set robot in freedrive/backdrive mode where an operator can jog
