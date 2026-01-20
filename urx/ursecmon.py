@@ -708,7 +708,7 @@ class SecondaryMonitor(Thread):
                 self._consecutive_timeouts += 1
                 
                 # Too many consecutive timeouts = connection is dead
-                if self._consecutive_timeouts >= 20:  # 20 * 0.5s = 10 seconds
+                if self._consecutive_timeouts >= 5:  # 20 * 0.5s = 10 seconds
                     self.logger.warning(
                         "No data received for %d timeouts (%.1fs), connection appears dead",
                         self._consecutive_timeouts,
@@ -906,7 +906,7 @@ class SecondaryMonitor(Thread):
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind(('', 0))
         server_socket.listen(1)
-        server_socket.settimeout(10.0)  # Increased from 5.0 for WSL
+        server_socket.settimeout(5.0)  # Increased from 5.0 for WSL
         
         port = server_socket.getsockname()[1]
         
