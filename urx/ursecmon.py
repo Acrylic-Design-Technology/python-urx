@@ -545,6 +545,7 @@ class SecondaryMonitor(Thread):
         self.running = False
         self._dataEvent = Condition()
         self.lastpacket_timestamp = 0
+        self._consecutive_timeouts = 0
 
         self.start()
         try:
@@ -640,6 +641,7 @@ class SecondaryMonitor(Thread):
             
             if ans:
                 self._dataqueue = ans[1]
+                self._consecutive_timeouts = 0  # Reset on successful packet
                 self.logger.debug("Found packet of size {}".format(len(ans[0])))
                 return ans[0]
             
@@ -651,14 +653,30 @@ class SecondaryMonitor(Thread):
                     # Socket closed by peer
                     raise ConnectionResetError("Peer closed connection")
                 self._dataqueue += tmp
+                self._consecutive_timeouts = 0  # Reset on successful recv
                 
             except socket.timeout:
+                # Increment timeout counter
+                self._consecutive_timeouts += 1
+                
+                # Too many consecutive timeouts = connection is dead
+                if self._consecutive_timeouts >= 6:  # 6 * 0.5s = 3 seconds
+                    self.logger.warning(
+                        "No data received for %d timeouts (%.1fs), connection appears dead",
+                        self._consecutive_timeouts,
+                        self._consecutive_timeouts * 0.5
+                    )
+                    self._consecutive_timeouts = 0
+                    # Force reconnection by raising error
+                    raise ConnectionResetError("Connection timeout - no data received")
+                
                 # Normal timeout, just retry
                 continue
                 
             except (ConnectionResetError, ConnectionAbortedError, 
                     ConnectionRefusedError, BrokenPipeError, OSError) as ex:
                 # Connection lost - try to reconnect
+                self._consecutive_timeouts = 0
                 self.logger.warning("Connection error: %s, reconnecting...", ex)
                 
                 attempt = 0
