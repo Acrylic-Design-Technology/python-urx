@@ -660,11 +660,11 @@ class SecondaryMonitor(Thread):
                 self._consecutive_timeouts += 1
                 
                 # Too many consecutive timeouts = connection is dead
-                if self._consecutive_timeouts >= 6:  # 6 * 0.5s = 3 seconds
+                if self._consecutive_timeouts >= 20:  # 20 * 0.5s = 10 seconds
                     self.logger.warning(
                         "No data received for %d timeouts (%.1fs), connection appears dead",
                         self._consecutive_timeouts,
-                        self._consecutive_timeouts * 0.5
+                        self._consecutive_timeouts * 2
                     )
                     self._consecutive_timeouts = 0
                     # Force reconnection by raising error
