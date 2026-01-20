@@ -979,9 +979,9 @@ class SecondaryMonitor(Thread):
             self.send_program(prog)
             
             # Wait for connection from robot
-            self.logger.debug("Waiting for robot to connect...")
+            self.logger.info("Waiting for robot to connect...")
             client_socket, addr = server_socket.accept()
-            self.logger.debug("Robot connected from %s", addr)
+            self.logger.info("Robot connected from %s", addr)
             
             # Receive the joint values
             joint_values = []

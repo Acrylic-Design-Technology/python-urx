@@ -965,7 +965,6 @@ class URRobot(object):
                 )
                 + "\n"
             )
-        print("This is the program: ", prog)
         prog += end
         self.send_program(prog)
         
