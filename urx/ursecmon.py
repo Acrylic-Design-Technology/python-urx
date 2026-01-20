@@ -926,7 +926,7 @@ class SecondaryMonitor(Thread):
         except Exception:
             local_ip = self.host
         
-        self.logger.debug("Listening for IK result on %s:%s", local_ip, port)
+        self.logger.info("Listening for IK result on %s:%s", local_ip, port)
         
         client_socket = None
         try:
@@ -973,7 +973,7 @@ class SecondaryMonitor(Thread):
             prog_lines.append("get_ik_program()")
             
             prog = "\n".join(prog_lines)
-            self.logger.debug("Sending IK program: %s", prog)
+            self.logger.info("Sending IK program: %s", prog)
             
             # Send the program
             self.send_program(prog)
@@ -1000,17 +1000,17 @@ class SecondaryMonitor(Thread):
                 line, data = data.split(b"\n", 1)
                 joint_value = float(line.decode().strip())
                 joint_values.append(joint_value)
-                self.logger.debug("Received joint %s: %s", i, joint_value)
+                self.logger.info("Received joint %s: %s", i, joint_value)
             
             client_socket.close()
-            self.logger.debug("IK result: %s", joint_values)
+            self.logger.info("IK result: %s", joint_values)
             return joint_values
             
         except socket.timeout:
-            self.logger.error("Timeout waiting for IK result (WSL?)")
+            self.logger.info("Timeout waiting for IK result (WSL?)")
             raise Exception("Timeout waiting for inverse kinematics result")
         except Exception as ex:
-            self.logger.error("Error getting inverse kinematics: %s", ex)
+            self.logger.info("Error getting inverse kinematics: %s", ex)
             raise
         finally:
             if client_socket:
@@ -1077,7 +1077,7 @@ class SecondaryMonitor(Thread):
         except Exception:
             local_ip = self.host
         
-        self.logger.debug("Listening for IK solution check on %s:%s", local_ip, port)
+        self.logger.info("Listening for IK solution check on %s:%s", local_ip, port)
         
         client_socket = None
         try:
@@ -1119,15 +1119,15 @@ class SecondaryMonitor(Thread):
             prog_lines.append("check_ik_program()")
             
             prog = "\n".join(prog_lines)
-            self.logger.debug("Sending IK solution check program: %s", prog)
+            self.logger.info("Sending IK solution check program: %s", prog)
             
             # Send the program
             self.send_program(prog)
             
             # Wait for connection from robot
-            self.logger.debug("Waiting for robot to connect...")
+            self.logger.info("Waiting for robot to connect...")
             client_socket, addr = server_socket.accept()
-            self.logger.debug("Robot connected from %s", addr)
+            self.logger.info("Robot connected from %s", addr)
             
             # Receive the boolean result
             client_socket.settimeout(5.0)  # Increased from 2.0 for WSL
@@ -1148,14 +1148,14 @@ class SecondaryMonitor(Thread):
             has_solution = result_str == "true"
             
             client_socket.close()
-            self.logger.debug("IK solution check result: %s", has_solution)
+            self.logger.info("IK solution check result: %s", has_solution)
             return has_solution
             
         except socket.timeout:
-            self.logger.error("Timeout waiting for IK solution check result (WSL?)")
+            self.logger.info("Timeout waiting for IK solution check result (WSL?)")
             raise Exception("Timeout waiting for inverse kinematics solution check result")
         except Exception as ex:
-            self.logger.error("Error checking inverse kinematics solution: %s", ex)
+            self.logger.info("Error checking inverse kinematics solution: %s", ex)
             raise
         finally:
             if client_socket:
