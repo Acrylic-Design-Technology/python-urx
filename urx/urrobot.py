@@ -276,10 +276,31 @@ class URRobot(object):
         start_time = time.time()
         last_program_running = None
         stopped_count = 0
+        program_was_running = False
+        program_stopped_at = None
         
         while True:
             elapsed = time.time() - start_time
             if elapsed > timeout:
+                # Log what state we timed out in
+                if program_was_running and program_stopped_at is None:
+                    self.logger.error(
+                        "Move timeout: Program NEVER STOPPED (isProgramRunning stayed True for entire %.1fs)",
+                        elapsed
+                    )
+                elif program_stopped_at is not None:
+                    self.logger.error(
+                        "Move timeout: Program stopped %.1fs ago but not at target. "
+                        "Distance: %.4f, threshold: %.4f",
+                        elapsed - program_stopped_at, 
+                        self._get_dist(target, joints),
+                        threshold
+                    )
+                else:
+                    self.logger.error(
+                        "Move timeout: Program never started running (%.1fs)",
+                        elapsed
+                    )
                 raise RobotException(
                     f"Move timeout after {elapsed:.1f}s. "
                     f"Distance: {self._get_dist(target, joints):.4f}, "
