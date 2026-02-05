@@ -276,31 +276,10 @@ class URRobot(object):
         start_time = time.time()
         last_program_running = None
         stopped_count = 0
-        program_was_running = False
-        program_stopped_at = None
         
         while True:
             elapsed = time.time() - start_time
             if elapsed > timeout:
-                # Log what state we timed out in
-                if program_was_running and program_stopped_at is None:
-                    self.logger.error(
-                        "Move timeout: Program NEVER STOPPED (isProgramRunning stayed True for entire %.1fs)",
-                        elapsed
-                    )
-                elif program_stopped_at is not None:
-                    self.logger.error(
-                        "Move timeout: Program stopped %.1fs ago but not at target. "
-                        "Distance: %.4f, threshold: %.4f",
-                        elapsed - program_stopped_at, 
-                        self._get_dist(target, joints),
-                        threshold
-                    )
-                else:
-                    self.logger.error(
-                        "Move timeout: Program never started running (%.1fs)",
-                        elapsed
-                    )
                 raise RobotException(
                     f"Move timeout after {elapsed:.1f}s. "
                     f"Distance: {self._get_dist(target, joints):.4f}, "
@@ -333,6 +312,18 @@ class URRobot(object):
             
             is_program_running = mode_data.get("isProgramRunning", False)
             
+            # Get distance to target (check every iteration, not just when stopped)
+            try:
+                dist = self._get_dist(target, joints)
+            except Exception as ex:
+                self.logger.warning("Error calculating distance: %s", ex)
+                time.sleep(0.1)
+                continue
+            
+            self.logger.debug(
+                "distance to target is: %s, target dist is %s", dist, threshold
+            )
+            
             if is_program_running:
                 # Program running - reset counter
                 stopped_count = 0
@@ -340,14 +331,6 @@ class URRobot(object):
             else:
                 # Program not running
                 stopped_count += 1
-                
-                # Get distance to target
-                try:
-                    dist = self._get_dist(target, joints)
-                except Exception as ex:
-                    self.logger.warning("Error calculating distance: %s", ex)
-                    time.sleep(0.1)
-                    continue
                 
                 self.logger.debug(
                     "Program stopped, distance: %.4f, threshold: %.4f", 
@@ -361,7 +344,7 @@ class URRobot(object):
                 
                 # Program stopped but not at target
                 # Wait a bit to see if it's just a momentary state
-                if stopped_count > 10:  # 1 second at 10Hz
+                if stopped_count > 50:  # 5 seconds at 10Hz
                     current_pose = URRobot.getl(self)
                     raise RobotException(
                         f"Program stopped without reaching target. "
