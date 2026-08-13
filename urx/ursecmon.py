@@ -11,6 +11,7 @@ http://support.universal-robots.com/Technical/PrimaryAndSecondaryClientInterface
 
 from threading import Thread, Condition, Lock
 import logging
+import os
 import struct
 import socket
 from copy import copy
@@ -896,6 +897,32 @@ class SecondaryMonitor(Thread):
             "get_inverse_kin"
         )
     
+    def _callback_host(self):
+        """
+        The address the robot is told to dial back on for IK results.
+        URX_CALLBACK_HOST wins: behind a NAT the discovered address is the local
+        one, which the robot cannot route to.
+        """
+        override = os.environ.get("URX_CALLBACK_HOST")
+        if override:
+            return override
+
+        try:
+            temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            temp_sock.connect((self.host, self.secondary_port))
+            local_ip = temp_sock.getsockname()[0]
+            temp_sock.close()
+        except Exception:
+            return self.host
+
+        # Warn if WSL/container detected
+        if local_ip.startswith('172.'):
+            self.logger.warning(
+                "Detected internal IP %s - set URX_CALLBACK_HOST if IK times out",
+                local_ip
+            )
+        return local_ip
+
     def _compute_inverse_kin(self, pose, qnear=None, maxPositionError=1e-10,
                             maxOrientationError=1e-10, tcp='active_tcp'):
         """
@@ -908,25 +935,11 @@ class SecondaryMonitor(Thread):
         server_socket.bind(('0.0.0.0', FIXED_PORT))
         server_socket.listen(1)
         server_socket.settimeout(5.0)  # Increased from 5.0 for WSL
-        
+
         port = server_socket.getsockname()[1]
-        
-        # Get local IP
-        try:
-            temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            temp_sock.connect((self.host, self.secondary_port))
-            local_ip = temp_sock.getsockname()[0]
-            temp_sock.close()
-            
-            # Warn if WSL detected
-            if local_ip.startswith('172.'):
-                self.logger.warning(
-                    "Detected internal IP %s - if IK fails, check WSL networking", 
-                    local_ip
-                )
-        except Exception:
-            local_ip = self.host
-        
+
+        local_ip = self._callback_host()
+
         self.logger.info("Listening for IK result on %s:%s", local_ip, port)
         
         client_socket = None
@@ -1056,28 +1069,16 @@ class SecondaryMonitor(Thread):
         # Create temporary server to receive result
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind(('', 0))
+        # Fixed, not ephemeral: an ephemeral port cannot be published from a container.
+        FIXED_PORT = 50002
+        server_socket.bind(('0.0.0.0', FIXED_PORT))
         server_socket.listen(1)
         server_socket.settimeout(10.0)  # Increased from 5.0 for WSL
-        
+
         port = server_socket.getsockname()[1]
-        
-        # Get local IP
-        try:
-            temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            temp_sock.connect((self.host, self.secondary_port))
-            local_ip = temp_sock.getsockname()[0]
-            temp_sock.close()
-            
-            # Warn if WSL detected
-            if local_ip.startswith('172.'):
-                self.logger.warning(
-                    "Detected internal IP %s - if IK fails, check WSL networking", 
-                    local_ip
-                )
-        except Exception:
-            local_ip = self.host
-        
+
+        local_ip = self._callback_host()
+
         self.logger.info("Listening for IK solution check on %s:%s", local_ip, port)
         
         client_socket = None
