@@ -11,11 +11,23 @@ http://support.universal-robots.com/Technical/PrimaryAndSecondaryClientInterface
 
 from threading import Thread, Condition, Lock
 import logging
-import os
+import random
 import struct
 import socket
 from copy import copy
 import time
+
+from urx import urrtde
+
+# Where a sent program leaves its answer for us to read back over RTDE. Addresses 0-23
+# are the user range on both CB3 and e-series. The nonce is written last, so a frame
+# carrying it necessarily carries the values written before it - that is what makes a
+# register read as unambiguous as the connection it replaces.
+IK_JOINT_REGISTERS = tuple("output_double_register_{}".format(i) for i in range(6))
+IK_RESULT_REGISTER = "output_double_register_0"
+IK_NONCE_REGISTER = "output_int_register_0"
+IK_NONCE_ADDRESS = 0
+IK_TIMEOUT_SECONDS = 5.0
 
 __author__ = "Olivier Roulet-Dubonnet"
 __copyright__ = "Copyright 2011-2013, Sintef Raufoss Manufacturing"
@@ -539,6 +551,10 @@ class SecondaryMonitor(Thread):
         )
         self._s_secondary.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         
+        # Opened on the first inverse kinematics call, not here: a monitor that never
+        # asks for IK never needs it.
+        self._rtde_client = None
+
         self._prog_queue = []
         self._prog_queue_lock = Lock()
         self._dataqueue = bytes()
@@ -897,142 +913,100 @@ class SecondaryMonitor(Thread):
             "get_inverse_kin"
         )
     
-    def _callback_host(self):
+    def _rtde(self):
         """
-        The address the robot is told to dial back on for IK results.
-        URX_CALLBACK_HOST wins: behind a NAT the discovered address is the local
-        one, which the robot cannot route to.
+        The connection a sent program's answer comes back on, opened on first use.
+        Outbound, so no part of this depends on the robot being able to address us.
         """
-        override = os.environ.get("URX_CALLBACK_HOST")
-        if override:
-            return override
-
-        try:
-            temp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            temp_sock.connect((self.host, self.secondary_port))
-            local_ip = temp_sock.getsockname()[0]
-            temp_sock.close()
-        except Exception:
-            return self.host
-
-        # Warn if WSL/container detected
-        if local_ip.startswith('172.'):
-            self.logger.warning(
-                "Detected internal IP %s - set URX_CALLBACK_HOST if IK times out",
-                local_ip
+        if self._rtde_client is None:
+            client = urrtde.RTDEClient(
+                self.host,
+                (IK_NONCE_REGISTER,) + IK_JOINT_REGISTERS,
+                logger=self.logger,
             )
-        return local_ip
+            client.connect()
+            self._rtde_client = client
+        return self._rtde_client
+
+    def _ik_call(self, function, pose, qnear, maxPositionError, maxOrientationError, tcp):
+        """
+        The URScript expression asking the controller to solve. Shared by the solve and
+        the has-solution paths, which differ only in which function they name.
+        """
+        pose_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*pose)
+        if qnear is not None:
+            qnear_str = "[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*qnear)
+            if tcp == 'active_tcp':
+                return "{}({}, {}, {:.10f}, {:.10f})".format(
+                    function, pose_str, qnear_str, maxPositionError, maxOrientationError
+                )
+            tcp_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*tcp)
+            return "{}({}, {}, {:.10f}, {:.10f}, {})".format(
+                function, pose_str, qnear_str, maxPositionError,
+                maxOrientationError, tcp_str
+            )
+        if tcp == 'active_tcp':
+            return "{}({}, maxPositionError={:.10f}, maxOrientationError={:.10f})".format(
+                function, pose_str, maxPositionError, maxOrientationError
+            )
+        tcp_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*tcp)
+        return "{}({}, maxPositionError={:.10f}, maxOrientationError={:.10f}, tcp={})".format(
+            function, pose_str, maxPositionError, maxOrientationError, tcp_str
+        )
+
+    def _run_for_registers(self, name, body, timeout=IK_TIMEOUT_SECONDS):
+        """
+        Send a program that writes its answer to the output registers, and return the
+        frame carrying it.
+
+        The nonce is drawn to differ from what the registers hold now, so a stale value
+        from an earlier attempt can never be mistaken for this one's answer. Raises
+        socket.timeout when it does not arrive, which is what _retry_ik_operation retries.
+        """
+        rtde = self._rtde()
+        current = rtde.read(timeout=timeout)[IK_NONCE_REGISTER]
+        nonce = current
+        while nonce == current:
+            nonce = random.randint(1, 2 ** 31 - 1)
+
+        prog = "\n".join(
+            ["def {}():".format(name)]
+            + body
+            + ["  write_output_integer_register({}, {})".format(IK_NONCE_ADDRESS, nonce),
+               "end",
+               "{}()".format(name)]
+        )
+        self.logger.debug("Sending program: %s", prog)
+        self.send_program(prog)
+
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise socket.timeout(
+                    "{}: the robot did not report a result within {}s".format(name, timeout)
+                )
+            frame = rtde.read(timeout=remaining)
+            if frame[IK_NONCE_REGISTER] == nonce:
+                return frame
 
     def _compute_inverse_kin(self, pose, qnear=None, maxPositionError=1e-10,
                             maxOrientationError=1e-10, tcp='active_tcp'):
         """
         Core inverse kinematics computation logic.
         """
-        # Create temporary server to receive result
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        FIXED_PORT = 50001
-        server_socket.bind(('0.0.0.0', FIXED_PORT))
-        server_socket.listen(1)
-        server_socket.settimeout(5.0)  # Increased from 5.0 for WSL
+        ik_call = self._ik_call(
+            "get_inverse_kin", pose, qnear, maxPositionError, maxOrientationError, tcp
+        )
+        body = ["  joint_result = {}".format(ik_call)] + [
+            "  write_output_float_register({}, joint_result[{}])".format(i, i)
+            for i in range(6)
+        ]
 
-        port = server_socket.getsockname()[1]
-
-        local_ip = self._callback_host()
-
-        self.logger.info("Listening for IK result on %s:%s", local_ip, port)
-        
-        client_socket = None
-        try:
-            # Format pose as URScript pose
-            pose_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*pose)
-            
-            # Build URScript program
-            prog_lines = []
-            
-            # Call get_inverse_kin with appropriate parameters
-            if qnear is not None:
-                qnear_str = "[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*qnear)
-                if tcp == 'active_tcp':
-                    ik_call = "get_inverse_kin({}, {}, {:.10f}, {:.10f})".format(
-                        pose_str, qnear_str, maxPositionError, maxOrientationError
-                    )
-                else:
-                    tcp_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*tcp)
-                    ik_call = "get_inverse_kin({}, {}, {:.10f}, {:.10f}, {})".format(
-                        pose_str, qnear_str, maxPositionError, maxOrientationError, tcp_str
-                    )
-            else:
-                if tcp == 'active_tcp':
-                    ik_call = "get_inverse_kin({}, maxPositionError={:.10f}, maxOrientationError={:.10f})".format(
-                        pose_str, maxPositionError, maxOrientationError
-                    )
-                else:
-                    tcp_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*tcp)
-                    ik_call = "get_inverse_kin({}, maxPositionError={:.10f}, maxOrientationError={:.10f}, tcp={})".format(
-                        pose_str, maxPositionError, maxOrientationError, tcp_str
-                    )
-            
-            prog_lines.append("def get_ik_program():")
-            prog_lines.append("  joint_result = {}".format(ik_call))
-            prog_lines.append("  socket_open(\"{}\", {})".format(local_ip, port))
-            prog_lines.append("  socket_send_line(joint_result[0])")
-            prog_lines.append("  socket_send_line(joint_result[1])")
-            prog_lines.append("  socket_send_line(joint_result[2])")
-            prog_lines.append("  socket_send_line(joint_result[3])")
-            prog_lines.append("  socket_send_line(joint_result[4])")
-            prog_lines.append("  socket_send_line(joint_result[5])")
-            prog_lines.append("  socket_close()")
-            prog_lines.append("end")
-            prog_lines.append("get_ik_program()")
-            
-            prog = "\n".join(prog_lines)
-            self.logger.info("Sending IK program: %s", prog)
-            
-            # Send the program
-            self.send_program(prog)
-            
-            # Wait for connection from robot
-            self.logger.info("Waiting for robot to connect...")
-            client_socket, addr = server_socket.accept()
-            self.logger.info("Robot connected from %s", addr)
-            
-            # Receive the joint values
-            joint_values = []
-            client_socket.settimeout(5.0)  # Increased from 2.0 for WSL
-            data = b""
-            
-            for i in range(6):
-                # Read until we get a newline
-                while b"\n" not in data:
-                    chunk = client_socket.recv(1024)
-                    if not chunk:
-                        raise Exception("Connection closed before receiving all joint values")
-                    data += chunk
-                
-                # Extract one line
-                line, data = data.split(b"\n", 1)
-                joint_value = float(line.decode().strip())
-                joint_values.append(joint_value)
-                self.logger.info("Received joint %s: %s", i, joint_value)
-            
-            client_socket.close()
-            self.logger.info("IK result: %s", joint_values)
-            return joint_values
-            
-        except socket.timeout:
-            self.logger.info("Timeout waiting for IK result (WSL?)")
-            raise Exception("Timeout waiting for inverse kinematics result")
-        except Exception as ex:
-            self.logger.info("Error getting inverse kinematics: %s", ex)
-            raise
-        finally:
-            if client_socket:
-                try:
-                    client_socket.close()
-                except:
-                    pass
-            server_socket.close()
+        frame = self._run_for_registers("get_ik_program", body)
+        joint_values = [frame[name] for name in IK_JOINT_REGISTERS]
+        self.logger.info("IK result: %s", joint_values)
+        return joint_values
 
     def get_inverse_kin_has_solution(self, pose, qnear=None, maxPositionError=1e-10,
                                        maxOrientationError=1e-10, tcp='active_tcp'):
@@ -1066,111 +1040,34 @@ class SecondaryMonitor(Thread):
         """
         Core inverse kinematics solution check logic.
         """
-        # Create temporary server to receive result
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Fixed, not ephemeral: an ephemeral port cannot be published from a container.
-        FIXED_PORT = 50002
-        server_socket.bind(('0.0.0.0', FIXED_PORT))
-        server_socket.listen(1)
-        server_socket.settimeout(10.0)  # Increased from 5.0 for WSL
+        ik_call = self._ik_call(
+            "get_inverse_kin_has_solution", pose, qnear,
+            maxPositionError, maxOrientationError, tcp
+        )
+        # A register holds a float, and URScript has no ternary, so the boolean is
+        # widened to 1 or 0 in an if/else.
+        body = [
+            "  has_solution = {}".format(ik_call),
+            "  if has_solution:",
+            "    write_output_float_register(0, 1)",
+            "  else:",
+            "    write_output_float_register(0, 0)",
+            "  end",
+        ]
 
-        port = server_socket.getsockname()[1]
-
-        local_ip = self._callback_host()
-
-        self.logger.info("Listening for IK solution check on %s:%s", local_ip, port)
-        
-        client_socket = None
-        try:
-            # Format pose as URScript pose
-            pose_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*pose)
-            
-            # Build URScript program
-            prog_lines = []
-            
-            # Call get_inverse_kin_has_solution with appropriate parameters
-            if qnear is not None:
-                qnear_str = "[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*qnear)
-                if tcp == 'active_tcp':
-                    ik_call = "get_inverse_kin_has_solution({}, {}, {:.10f}, {:.10f})".format(
-                        pose_str, qnear_str, maxPositionError, maxOrientationError
-                    )
-                else:
-                    tcp_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*tcp)
-                    ik_call = "get_inverse_kin_has_solution({}, {}, {:.10f}, {:.10f}, {})".format(
-                        pose_str, qnear_str, maxPositionError, maxOrientationError, tcp_str
-                    )
-            else:
-                if tcp == 'active_tcp':
-                    ik_call = "get_inverse_kin_has_solution({}, maxPositionError={:.10f}, maxOrientationError={:.10f})".format(
-                        pose_str, maxPositionError, maxOrientationError
-                    )
-                else:
-                    tcp_str = "p[{:.6f},{:.6f},{:.6f},{:.6f},{:.6f},{:.6f}]".format(*tcp)
-                    ik_call = "get_inverse_kin_has_solution({}, maxPositionError={:.10f}, maxOrientationError={:.10f}, tcp={})".format(
-                        pose_str, maxPositionError, maxOrientationError, tcp_str
-                    )
-            
-            prog_lines.append("def check_ik_program():")
-            prog_lines.append("  has_solution = {}".format(ik_call))
-            prog_lines.append("  socket_open(\"{}\", {})".format(local_ip, port))
-            prog_lines.append("  socket_send_line(has_solution)")
-            prog_lines.append("  socket_close()")
-            prog_lines.append("end")
-            prog_lines.append("check_ik_program()")
-            
-            prog = "\n".join(prog_lines)
-            self.logger.info("Sending IK solution check program: %s", prog)
-            
-            # Send the program
-            self.send_program(prog)
-            
-            # Wait for connection from robot
-            self.logger.info("Waiting for robot to connect...")
-            client_socket, addr = server_socket.accept()
-            self.logger.info("Robot connected from %s", addr)
-            
-            # Receive the boolean result
-            client_socket.settimeout(5.0)  # Increased from 2.0 for WSL
-            data = b""
-            
-            # Read until we get a newline
-            while b"\n" not in data:
-                chunk = client_socket.recv(1024)
-                if not chunk:
-                    raise Exception("Connection closed before receiving solution check result")
-                data += chunk
-            
-            # Extract the result
-            line = data.split(b"\n", 1)[0]
-            result_str = line.decode().strip().lower()
-            
-            # URScript returns "True" or "False" as strings
-            has_solution = result_str == "true"
-            
-            client_socket.close()
-            self.logger.info("IK solution check result: %s", has_solution)
-            return has_solution
-            
-        except socket.timeout:
-            self.logger.info("Timeout waiting for IK solution check result (WSL?)")
-            raise Exception("Timeout waiting for inverse kinematics solution check result")
-        except Exception as ex:
-            self.logger.info("Error checking inverse kinematics solution: %s", ex)
-            raise
-        finally:
-            if client_socket:
-                try:
-                    client_socket.close()
-                except:
-                    pass
-            server_socket.close()
+        frame = self._run_for_registers("check_ik_program", body)
+        has_solution = frame[IK_RESULT_REGISTER] > 0.5
+        self.logger.info("IK solution check result: %s", has_solution)
+        return has_solution
 
     def close(self):
         self._trystop = True
         self.join()
-        
+
+        if self._rtde_client is not None:
+            self._rtde_client.close()
+            self._rtde_client = None
+
         # Close the socket
         try:
             self._s_secondary.close()
