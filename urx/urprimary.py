@@ -37,14 +37,14 @@ SAFETY_MODES = {
 }
 
 # Keys ParserUtils produces for the type-20 messages worth reporting, in the order
-# they are checked. Everything else is state.
+# they are checked. Everything else is state. Key messages are left out: they are the
+# PROGRAM_XXX_STARTED/STOPPED pair around every program, and a stroke sends several.
 MESSAGE_KEYS = (
     "runtimeExceptionMessage",
     "popupMessage",
     "robotCommMessage",
     "safetyModeMessage",
     "messageText",
-    "keyMessage",
     "requestValueMessage",
 )
 
@@ -65,9 +65,10 @@ def _describe(key, message):
             kind, _text(message, "messageTitle"), _text(message)
         )
     if key == "robotCommMessage":
-        return "error code {}.{}: {}".format(
-            message["code"], message["argument"], _text(message)
-        )
+        # The text is routinely empty on these; the code is the whole message.
+        text = _text(message)
+        code = "error code {}.{}".format(message["code"], message["argument"])
+        return "{}: {}".format(code, text) if text else code
     if key == "safetyModeMessage":
         mode = message["safetyModeType"]
         return "safety mode {} (code {}.{})".format(
@@ -193,9 +194,21 @@ class PrimaryMonitor(Thread):
                 self._messages.append((time.time(), text))
 
     def get_messages(self, since=None):
-        """Retained messages, newest last. ``since`` is a ``time.time()`` stamp."""
+        """
+        Retained messages, newest last, with runs of the same text collapsed - a robot
+        that repeats one complaint every 100ms while a move hangs would otherwise bury
+        the message that explains it. ``since`` is a ``time.time()`` stamp.
+        """
         with self._lock:
-            return [text for stamp, text in self._messages if since is None or stamp >= since]
+            texts = [t for stamp, t in self._messages if since is None or stamp >= since]
+
+        collapsed = []
+        for text in texts:
+            if collapsed and collapsed[-1][0] == text:
+                collapsed[-1][1] += 1
+            else:
+                collapsed.append([text, 1])
+        return [t if n == 1 else "%s (x%d)" % (t, n) for t, n in collapsed]
 
     def close(self):
         self._trystop = True
