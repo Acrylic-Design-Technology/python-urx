@@ -155,7 +155,11 @@ class PrimaryMonitor(Thread):
         try:
             parsed = self._parser.parse(packet)
         except ParsingException as ex:
-            self.logger.debug("Could not parse primary packet: %s", ex)
+            # Silence here would recreate the problem this listener exists to fix, so
+            # report the payload even when the layout does not match.
+            self.logger.info(
+                "Could not parse primary packet (%s): %s", ex, printable_text(packet)
+            )
             return
 
         for key in MESSAGE_KEYS:
