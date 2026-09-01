@@ -18,6 +18,7 @@ from urx.ursecmon import ParserUtils, ParsingException, printable_text
 
 PRIMARY_PORT = 30001
 HEADER = struct.Struct("!iB")
+ROBOT_MESSAGE = 20
 MAX_PACKET_SIZE = 2**21
 RECONNECT_DELAY = 2.0
 
@@ -167,6 +168,12 @@ class PrimaryMonitor(Thread):
         return None
 
     def _handle(self, packet):
+        # Robot state arrives here at 10Hz as well. Parsing it would be wasted work
+        # twice over - the secondary monitor already does - and a parse failure on it
+        # would put the line below in the log ten times a second.
+        if packet[4] != ROBOT_MESSAGE:
+            return
+
         try:
             parsed = self._parser.parse(packet)
         except ParsingException as ex:
