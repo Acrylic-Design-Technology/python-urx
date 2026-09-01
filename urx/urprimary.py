@@ -21,6 +21,20 @@ HEADER = struct.Struct("!iB")
 MAX_PACKET_SIZE = 2**21
 RECONNECT_DELAY = 2.0
 
+SAFETY_MODES = {
+    1: "NORMAL",
+    2: "REDUCED",
+    3: "PROTECTIVE_STOP",
+    4: "RECOVERY",
+    5: "SAFEGUARD_STOP",
+    6: "SYSTEM_EMERGENCY_STOP",
+    7: "ROBOT_EMERGENCY_STOP",
+    8: "VIOLATION",
+    9: "FAULT",
+    10: "VALIDATE_JOINT_ID",
+    11: "UNDEFINED_SAFETY_MODE",
+}
+
 # Keys ParserUtils produces for the type-20 messages worth reporting, in the order
 # they are checked. Everything else is state.
 MESSAGE_KEYS = (
@@ -54,8 +68,9 @@ def _describe(key, message):
             message["code"], message["argument"], _text(message)
         )
     if key == "safetyModeMessage":
+        mode = message["safetyModeType"]
         return "safety mode {} (code {}.{})".format(
-            message["safetyModeType"], message["code"], message["argument"]
+            SAFETY_MODES.get(mode, mode), message["code"], message["argument"]
         )
     if key == "keyMessage":
         return "{}: {}".format(_text(message, "messageTitle"), _text(message))

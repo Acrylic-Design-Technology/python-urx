@@ -310,9 +310,15 @@ class URRobot(object):
             
             # Check for stops
             if mode_data.get("isEmergencyStopped"):
-                raise RobotException("Robot emergency stopped")
+                raise RobotException(
+                    "Robot emergency stopped"
+                    f"{self._robot_message_report(start_time)}"
+                )
             if mode_data.get("isSecurityStopped"):
-                raise RobotException("Robot protective/security stopped")
+                raise RobotException(
+                    "Robot protective/security stopped"
+                    f"{self._robot_message_report(start_time)}"
+                )
             
             is_program_running = mode_data.get("isProgramRunning", False)
             
