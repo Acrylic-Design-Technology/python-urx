@@ -56,6 +56,11 @@ class TimeoutException(Exception):
         Exception.__init__(self, *args)
 
 
+def printable_text(data):
+    """Readable rendering of a packet payload, for messages we cannot parse."""
+    return "".join(chr(b) if 32 <= b < 127 else "." for b in data)
+
+
 class ParserUtils(object):
     def __init__(self):
         self.logger = logging.getLogger('URX Logger')
@@ -301,7 +306,7 @@ class ParserUtils(object):
                 elif tmp["robotMessageType"] == 6:
                     allData["robotCommMessage"] = self._get_data(
                         pdata,
-                        "!iBQbb iiAc",
+                        "!iBQbb iiiIIAc",
                         (
                             "size",
                             "type",
@@ -310,6 +315,9 @@ class ParserUtils(object):
                             "robotMessageType",
                             "code",
                             "argument",
+                            "reportLevel",
+                            "dataType",
+                            "data",
                             "messageText",
                         ),
                     )
@@ -330,15 +338,18 @@ class ParserUtils(object):
                 elif tmp["robotMessageType"] == 2:
                     allData["popupMessage"] = self._get_data(
                         pdata,
-                        "!iBQbb ??BAcAc",
+                        "!iBQbb II???BAcAc",
                         (
                             "size",
                             "type",
                             "timestamp",
                             "source",
                             "robotMessageType",
+                            "requestId",
+                            "requestedType",
                             "warning",
                             "error",
+                            "blocking",
                             "titleSize",
                             "messageTitle",
                             "messageText",
@@ -392,9 +403,9 @@ class ParserUtils(object):
                         ),
                     )
                 elif tmp["robotMessageType"] == 5:
-                    allData["keyMessage"] = self._get_data(
+                    allData["safetyModeMessage"] = self._get_data(
                         pdata,
-                        "!iBQbb iiAc",
+                        "!iBQbb iiBII",
                         (
                             "size",
                             "type",
@@ -403,11 +414,47 @@ class ParserUtils(object):
                             "robotMessageType",
                             "code",
                             "argument",
+                            "safetyModeType",
+                            "reportDataType",
+                            "reportData",
+                        ),
+                    )
+                elif tmp["robotMessageType"] == 9:
+                    allData["requestValueMessage"] = self._get_data(
+                        pdata,
+                        "!iBQbb IIAc",
+                        (
+                            "size",
+                            "type",
+                            "timestamp",
+                            "source",
+                            "robotMessageType",
+                            "requestId",
+                            "requestedType",
+                            "messageText",
+                        ),
+                    )
+                elif tmp["robotMessageType"] == 10:
+                    allData["runtimeExceptionMessage"] = self._get_data(
+                        pdata,
+                        "!iBQbb iiAc",
+                        (
+                            "size",
+                            "type",
+                            "timestamp",
+                            "source",
+                            "robotMessageType",
+                            "scriptLineNumber",
+                            "scriptColumnNumber",
                             "messageText",
                         ),
                     )
                 else:
-                    self.logger.debug("Message type parser not implemented %s", tmp)
+                    self.logger.info(
+                        "Unparsed robot message type %s: %s",
+                        tmp["robotMessageType"],
+                        printable_text(pdata),
+                    )
             else:
                 self.logger.debug("Unknown packet type %s with size %s", ptype, psize)
 

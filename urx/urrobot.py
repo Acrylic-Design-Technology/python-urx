@@ -13,6 +13,7 @@ try:
 except ImportError:
     from collections import Sequence
 
+from urx import urprimary
 from urx import urrtmon
 from urx import ursecmon
 
@@ -44,6 +45,8 @@ class URRobot(object):
 
         self.logger.debug("Opening secondary monitor socket")
         self.secmon = ursecmon.SecondaryMonitor(self.host)  # data from robot at 10Hz
+        # Faults reach primary clients only, so they are read on a separate socket.
+        self.primary = urprimary.PrimaryMonitor(self.host)
 
         self.rtmon = None
         if use_rt:
@@ -284,6 +287,7 @@ class URRobot(object):
                     f"Move timeout after {elapsed:.1f}s. "
                     f"Distance: {self._get_dist(target, joints):.4f}, "
                     f"threshold: {threshold:.4f}"
+                    f"{self._robot_message_report(start_time)}"
                 )
             
             # Check robot state
@@ -350,9 +354,16 @@ class URRobot(object):
                         f"Program stopped without reaching target. "
                         f"Distance: {dist:.4f}, threshold: {threshold:.4f}, "
                         f"target: {target}, current: {current_pose}"
+                        f"{self._robot_message_report(start_time)}"
                     )
             
             time.sleep(0.1)  # 10Hz polling
+
+    def _robot_message_report(self, since):
+        messages = self.primary.get_messages(since=since)
+        if not messages:
+            return ". Robot reported nothing"
+        return ". Robot reported: " + "; ".join(messages)
 
     def _get_dist(self, target, joints=False):
         if joints:
@@ -1004,6 +1015,7 @@ class URRobot(object):
         """
         self.logger.info("Closing sockets to robot")
         self.secmon.close()
+        self.primary.close()
         if self.rtmon:
             self.rtmon.stop()
     
