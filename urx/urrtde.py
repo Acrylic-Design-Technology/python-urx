@@ -130,7 +130,7 @@ class RTDEClient(object):
         if not struct.unpack(">B", self._request(_CONTROL_PACKAGE_START))[0]:
             raise RTDEError("Controller refused to start the RTDE stream")
 
-        self.logger.info(
+        self.logger.debug(
             "RTDE connected to %s, recipe %s, %s variables",
             self.host, self._recipe_id, len(self.variables),
         )

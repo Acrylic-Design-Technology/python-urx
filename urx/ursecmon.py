@@ -597,10 +597,6 @@ class SecondaryMonitor(Thread):
             (self.host, self.secondary_port), timeout=2.0
         )
         self._s_secondary.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        
-        # Opened on the first inverse kinematics call, not here: a monitor that never
-        # asks for IK never needs it.
-        self._rtde_client = None
 
         self._prog_queue = []
         self._prog_queue_lock = Lock()
@@ -960,21 +956,6 @@ class SecondaryMonitor(Thread):
             "get_inverse_kin"
         )
     
-    def _rtde(self):
-        """
-        The connection a sent program's answer comes back on, opened on first use.
-        Outbound, so no part of this depends on the robot being able to address us.
-        """
-        if self._rtde_client is None:
-            client = urrtde.RTDEClient(
-                self.host,
-                (IK_NONCE_REGISTER,) + IK_JOINT_REGISTERS,
-                logger=self.logger,
-            )
-            client.connect()
-            self._rtde_client = client
-        return self._rtde_client
-
     def _ik_call(self, function, pose, qnear, maxPositionError, maxOrientationError, tcp):
         """
         The URScript expression asking the controller to solve. Shared by the solve and
@@ -1009,33 +990,42 @@ class SecondaryMonitor(Thread):
         The nonce is drawn to differ from what the registers hold now, so a stale value
         from an earlier attempt can never be mistaken for this one's answer. Raises
         socket.timeout when it does not arrive, which is what _retry_ik_operation retries.
+
+        The RTDE connection lives only for this call: the controller closes one whose
+        unread frames overflow, which a connection idling between calls will do.
         """
-        rtde = self._rtde()
-        current = rtde.read(timeout=timeout)[IK_NONCE_REGISTER]
-        nonce = current
-        while nonce == current:
-            nonce = random.randint(1, 2 ** 31 - 1)
-
-        prog = "\n".join(
-            ["def {}():".format(name)]
-            + body
-            + ["  write_output_integer_register({}, {})".format(IK_NONCE_ADDRESS, nonce),
-               "end",
-               "{}()".format(name)]
+        rtde = urrtde.RTDEClient(
+            self.host, (IK_NONCE_REGISTER,) + IK_JOINT_REGISTERS, logger=self.logger
         )
-        self.logger.debug("Sending program: %s", prog)
-        self.send_program(prog)
+        rtde.connect()
+        try:
+            current = rtde.read(timeout=timeout)[IK_NONCE_REGISTER]
+            nonce = current
+            while nonce == current:
+                nonce = random.randint(1, 2 ** 31 - 1)
 
-        deadline = time.time() + timeout
-        while True:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                raise socket.timeout(
-                    "{}: the robot did not report a result within {}s".format(name, timeout)
-                )
-            frame = rtde.read(timeout=remaining)
-            if frame[IK_NONCE_REGISTER] == nonce:
-                return frame
+            prog = "\n".join(
+                ["def {}():".format(name)]
+                + body
+                + ["  write_output_integer_register({}, {})".format(IK_NONCE_ADDRESS, nonce),
+                   "end",
+                   "{}()".format(name)]
+            )
+            self.logger.debug("Sending program: %s", prog)
+            self.send_program(prog)
+
+            deadline = time.time() + timeout
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise socket.timeout(
+                        "{}: the robot did not report a result within {}s".format(name, timeout)
+                    )
+                frame = rtde.read(timeout=remaining)
+                if frame[IK_NONCE_REGISTER] == nonce:
+                    return frame
+        finally:
+            rtde.close()
 
     def _compute_inverse_kin(self, pose, qnear=None, maxPositionError=1e-10,
                             maxOrientationError=1e-10, tcp='active_tcp'):
@@ -1110,10 +1100,6 @@ class SecondaryMonitor(Thread):
     def close(self):
         self._trystop = True
         self.join()
-
-        if self._rtde_client is not None:
-            self._rtde_client.close()
-            self._rtde_client = None
 
         # Close the socket
         try:
